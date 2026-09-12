@@ -15,13 +15,13 @@ from app.database.database import get_session
 from app.database.models import Game, GamePlayer, GameStatus, GameType
 from app.game import engine
 from app.game.render import (
+    ball_result_text,
     bowl_locked_text,
     bowler_dm_text,
     final_result_text,
     scoreboard_text,
     solo_queue_text,
     status_text,
-    wicket_text,
 )
 from app.keyboards.game import (
     number_choice_keyboard,
@@ -383,18 +383,36 @@ async def _after_submission(context: ContextTypes.DEFAULT_TYPE, session: AsyncSe
         wickets_after=sum(1 for p in resolution.all_players if p.is_out),
     )
 
+    # Every ball (not just wickets/boundaries) gets its own GIF + revealed
+    # numbers message, tagging both the batter and bowler - this is the
+    # "ball delivered" beat shown after each resolved ball.
+    ball_caption = ball_result_text(
+        resolution.batter,
+        resolution.bowler,
+        resolution.ball.batter_number,
+        resolution.ball.bowler_number,
+        resolution.ball.runs,
+        resolution.is_wicket,
+    )
     if resolution.is_wicket:
+        media_event = media.OUT
+    elif resolution.ball.runs == 6:
+        media_event = media.SIX
+    elif resolution.ball.runs == 4:
+        media_event = media.FOUR
+    else:
+        media_event = media.BATTING
+
+    sent_media = await media.send_event_media(
+        _bound_send_video(context, game.chat_id), media_event, caption=ball_caption
+    )
+    if sent_media is None:
+        # No media configured / delivery failed - still send the text so the
+        # ball result and tags are never silently dropped.
         try:
-            await context.bot.send_message(chat_id=game.chat_id, text=wicket_text(resolution.batter), parse_mode="HTML")
+            await context.bot.send_message(chat_id=game.chat_id, text=ball_caption, parse_mode="HTML")
         except TelegramError:
             pass
-        await media.send_event_media(
-            _bound_send_video(context, game.chat_id), media.OUT
-        )
-    elif resolution.ball.runs == 4:
-        await media.send_event_media(_bound_send_video(context, game.chat_id), media.FOUR)
-    elif resolution.ball.runs == 6:
-        await media.send_event_media(_bound_send_video(context, game.chat_id), media.SIX)
 
     if resolution.is_over_complete and not resolution.is_game_over:
         over_balls = [
@@ -431,9 +449,6 @@ async def _after_submission(context: ContextTypes.DEFAULT_TYPE, session: AsyncSe
     batter = by_id[game.current_batter_id]
     bowler = by_id[game.current_bowler_id]
 
-    bowler_changed = resolution.next_bowler is not None
-    batter_changed = resolution.next_batter is not None
-
     text = status_text(game, batter, bowler, all_balls, waiting_on_dm=True)
     bot_username = (await context.bot.get_me()).username
     kb_rows = number_choice_keyboard("bat", game.id).inline_keyboard + status_message_keyboard(bot_username).inline_keyboard
@@ -451,8 +466,12 @@ async def _after_submission(context: ContextTypes.DEFAULT_TYPE, session: AsyncSe
         msg = await context.bot.send_message(chat_id=game.chat_id, text=text, parse_mode="HTML", reply_markup=keyboard)
         game.status_message_id = msg.message_id
 
-    if bowler_changed or batter_changed:
-        await _prompt_bowler_dm(context, session, game, batter, bowler)
+    # IMPORTANT: prompt the bowler again for EVERY ball while the game is
+    # still on - not only when the bowler/batter changes. Within the same
+    # over the same bowler must submit a fresh number for each delivery, and
+    # their previous DM message's keyboard was already replaced with the
+    # "locked" text, so without this the game stalls after ball 1.
+    await _prompt_bowler_dm(context, session, game, batter, bowler)
 
     await session.flush()
 
