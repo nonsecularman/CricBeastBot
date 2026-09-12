@@ -23,9 +23,9 @@ def team_join_keyboard(teams: list[tuple[int, str]]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def team_start_match_keyboard(teams: list[tuple[int, str]]) -> InlineKeyboardMarkup:
+def team_start_match_keyboard(teams: list[tuple[int, str]], slot_emoji: str = "🏏") -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton(f"🏏 {name}", callback_data=f"team:pick:{team_id}")]
+        [InlineKeyboardButton(f"{slot_emoji} {name}", callback_data=f"team:pick:{team_id}")]
         for team_id, name in teams
     ]
     rows.append([InlineKeyboardButton("🔙 Back", callback_data="menu:team")])
