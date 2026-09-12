@@ -78,9 +78,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def _cancel_active_game_if_any(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str | None:
     """
     Cancels the active solo game in this chat, IF one exists AND the caller
-    is authorized (game creator / group admin / bot owner). Returns a status
-    line to show the user, or None if there's nothing to cancel and no
-    message is needed beyond the generic "Cancelled".
+    is allowed to touch it: the game creator, a group admin, the bot owner,
+    OR any player who actually joined that game (so a stuck/confused game
+    can always be cleared by someone who's actually in it, not only by
+    whoever happens to hold admin rights).
 
     This exists because before this fix, a stuck/in-progress game had no
     user-facing way to be cleared - the queue-stage "Cancel Game" button
@@ -96,10 +97,16 @@ async def _cancel_active_game_if_any(update: Update, context: ContextTypes.DEFAU
         game = await engine.get_active_game(session, chat.id, GameType.SOLO)
         if game is None:
             return None
-        if not await is_authorized_controller(update, context, user.id, game.created_by):
+
+        authorized = await is_authorized_controller(update, context, user.id, game.created_by)
+        if not authorized:
+            players = await engine.get_players(session, game.id)
+            authorized = any(p.user_id == user.id for p in players)
+
+        if not authorized:
             return (
                 "⚠️ There's an active solo game here, but only the game creator, "
-                "a group admin, or the bot owner can cancel it."
+                "a group admin, the bot owner, or a player in that game can cancel it."
             )
         await engine.cancel_game(session, game)
         return "🛑 The active solo game in this chat has been cancelled. Start a fresh one anytime with /start."
