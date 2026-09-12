@@ -219,6 +219,8 @@ class Team(Base):
     chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
     name: Mapped[str] = mapped_column(String(64))
     captain_id: Mapped[int] = mapped_column(BigInteger)
+    slot: Mapped[str] = mapped_column(String(1), default="A")  # "A" or "B" - fixed per chat
+    cap_color: Mapped[str] = mapped_column(String(8), default="blue")  # "blue" or "red"
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     players: Mapped[list["TeamPlayer"]] = relationship(
