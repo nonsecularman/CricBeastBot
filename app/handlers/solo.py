@@ -65,7 +65,10 @@ async def spell_choice_callback(update: Update, context: ContextTypes.DEFAULT_TY
         try:
             game = await engine.create_solo_game(session, chat.id, user.id, balls_per_over)
         except engine.GameAlreadyStarted:
-            await query.answer("A solo game is already active in this chat!", show_alert=True)
+            await query.answer(
+                "A solo game is already active here! Send /cancel to stop it, then try again.",
+                show_alert=True,
+            )
             return
         await query.answer()
         players = await engine.get_players(session, game.id)
