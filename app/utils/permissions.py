@@ -36,3 +36,14 @@ async def is_authorized_controller(
     if user_id == game_creator_id or is_owner(user_id):
         return True
     return await is_group_admin(update, context, user_id)
+
+
+async def is_admin_or_owner(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
+    """
+    Group-admin tier (used for /admin, /games, /stopgame per the bot's
+    command spec) - broader than owner-only, but still never trusts a
+    username, only the verified Telegram user ID / chat-membership status.
+    """
+    if is_owner(user_id):
+        return True
+    return await is_group_admin(update, context, user_id)
