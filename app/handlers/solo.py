@@ -16,6 +16,7 @@ from app.database.models import Game, GamePlayer, GameStatus, GameType
 from app.game import engine
 from app.game.render import (
     ball_result_text,
+    batter_turn_text,
     bowl_locked_text,
     bowler_dm_text,
     final_result_text,
@@ -264,6 +265,16 @@ async def _launch_game(update: Update, context: ContextTypes.DEFAULT_TYPE, sessi
         msg = await context.bot.send_message(chat_id=game.chat_id, text=text, parse_mode="HTML", reply_markup=keyboard)
     game.status_message_id = msg.message_id
     await session.flush()
+
+    try:
+        await context.bot.send_message(
+            chat_id=game.chat_id,
+            text=batter_turn_text(batter),
+            parse_mode="HTML",
+            reply_markup=number_choice_keyboard("bat", game.id),
+        )
+    except TelegramError:
+        pass
     await _prompt_bowler_dm(context, session, game, batter, bowler)
 
 
@@ -468,6 +479,21 @@ async def _after_submission(context: ContextTypes.DEFAULT_TYPE, session: AsyncSe
     else:
         msg = await context.bot.send_message(chat_id=game.chat_id, text=text, parse_mode="HTML", reply_markup=keyboard)
         game.status_message_id = msg.message_id
+
+    # IMPORTANT: also send the batter a brand-new, separate "your turn"
+    # ping in the group (with the same number buttons) EVERY ball - editing
+    # the status message above does NOT trigger a Telegram notification
+    # even though it contains their tag, so without this fresh message the
+    # batter never actually gets pinged for their turn.
+    try:
+        await context.bot.send_message(
+            chat_id=game.chat_id,
+            text=batter_turn_text(batter),
+            parse_mode="HTML",
+            reply_markup=number_choice_keyboard("bat", game.id),
+        )
+    except TelegramError:
+        pass
 
     # IMPORTANT: prompt the bowler again for EVERY ball while the game is
     # still on - not only when the bowler/batter changes. Within the same
