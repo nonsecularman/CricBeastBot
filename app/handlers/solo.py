@@ -121,6 +121,7 @@ async def join_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         except engine.GameError as exc:
             await update.effective_message.reply_text(f"⚠️ {exc}")
             return
+        await session.commit()
         await update.effective_message.reply_text(f"✅ {display_name(user)} joined the queue!")
         await _refresh_queue_message(context, session, game)
         await _try_autostart(update, context, session, game)
@@ -139,6 +140,7 @@ async def leavesolo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         except engine.GameError as exc:
             await update.effective_message.reply_text(f"⚠️ {exc}")
             return
+        await session.commit()
         await update.effective_message.reply_text(f"🚪 {display_name(user)} left the queue.")
         await _refresh_queue_message(context, session, game)
 
@@ -181,6 +183,7 @@ async def join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         except engine.GameError as exc:
             await query.answer(str(exc), show_alert=True)
             return
+        await session.commit()
         await query.answer("✅ Joined!")
         await _refresh_queue_message(context, session, game)
         await _try_autostart(update, context, session, game)
@@ -200,6 +203,7 @@ async def leave_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except engine.GameError as exc:
             await query.answer(str(exc), show_alert=True)
             return
+        await session.commit()
         await query.answer("🚪 Left the queue.")
         await _refresh_queue_message(context, session, game)
 
@@ -237,8 +241,12 @@ async def cancelgame_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await query.answer("Only the creator, a group admin, or the owner can cancel.", show_alert=True)
             return
         await engine.cancel_game(session, game)
+        await session.commit()
         await query.answer("❌ Cancelled.")
-        await query.edit_message_text("❌ Solo game cancelled.")
+        try:
+            await query.edit_message_text("❌ Solo game cancelled.")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to edit cancel confirmation for game %s: %s", game.id, exc)
 
 
 # --------------------------------------------------------------------------- #
@@ -246,25 +254,42 @@ async def cancelgame_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 # --------------------------------------------------------------------------- #
 async def _launch_game(update: Update, context: ContextTypes.DEFAULT_TYPE, session: AsyncSession, game: Game) -> None:
     batter, bowler = await engine.start_game(session, game)
-    await session.flush()
+    # CRITICAL: commit the game-start transaction right now, BEFORE any
+    # Telegram calls below. Everything in this function only reads what we
+    # just committed, so any hiccup while sending messages (network blip,
+    # rate limit, an unexpected exception) can never roll back the fact that
+    # the game actually started - that was the root cause of "This game
+    # isn't in progress" showing up right after a successful-looking launch.
+    await session.commit()
+
+    try:
+        bot_username = (await context.bot.get_me()).username
+    except Exception as exc:  # noqa: BLE001 - never let this crash the launch
+        logger.warning("get_me() failed while launching game %s: %s", game.id, exc)
+        bot_username = None
+
     balls = []
     text = status_text(game, batter, bowler, balls, waiting_on_dm=True)
-    kb_rows = number_choice_keyboard("bat", game.id).inline_keyboard + status_message_keyboard(
-        (await context.bot.get_me()).username
-    ).inline_keyboard
+    kb_rows = list(number_choice_keyboard("bat", game.id).inline_keyboard)
+    if bot_username:
+        kb_rows += status_message_keyboard(bot_username).inline_keyboard
     keyboard = InlineKeyboardMarkup(kb_rows)
-    if game.status_message_id:
-        try:
-            msg = await context.bot.edit_message_text(
-                chat_id=game.chat_id, message_id=game.status_message_id, text=text,
-                parse_mode="HTML", reply_markup=keyboard,
-            )
-        except TelegramError:
+
+    try:
+        if game.status_message_id:
+            try:
+                msg = await context.bot.edit_message_text(
+                    chat_id=game.chat_id, message_id=game.status_message_id, text=text,
+                    parse_mode="HTML", reply_markup=keyboard,
+                )
+            except Exception:
+                msg = await context.bot.send_message(chat_id=game.chat_id, text=text, parse_mode="HTML", reply_markup=keyboard)
+        else:
             msg = await context.bot.send_message(chat_id=game.chat_id, text=text, parse_mode="HTML", reply_markup=keyboard)
-    else:
-        msg = await context.bot.send_message(chat_id=game.chat_id, text=text, parse_mode="HTML", reply_markup=keyboard)
-    game.status_message_id = msg.message_id
-    await session.flush()
+        game.status_message_id = msg.message_id
+        await session.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to post/update status message for game %s: %s", game.id, exc)
 
     try:
         await context.bot.send_message(
@@ -273,8 +298,9 @@ async def _launch_game(update: Update, context: ContextTypes.DEFAULT_TYPE, sessi
             parse_mode="HTML",
             reply_markup=number_choice_keyboard("bat", game.id),
         )
-    except TelegramError:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to send batter-turn ping for game %s: %s", game.id, exc)
+
     await _prompt_bowler_dm(context, session, game, batter, bowler)
 
 
@@ -284,8 +310,8 @@ async def _prompt_bowler_dm(context: ContextTypes.DEFAULT_TYPE, session: AsyncSe
     try:
         await send_dm(context, bowler.user_id, text, reply_markup=number_choice_keyboard("bowl", game.id))
     except DMFailed:
-        bot_username = (await context.bot.get_me()).username
         try:
+            bot_username = (await context.bot.get_me()).username
             await context.bot.send_message(
                 chat_id=game.chat_id,
                 text=(
@@ -297,8 +323,10 @@ async def _prompt_bowler_dm(context: ContextTypes.DEFAULT_TYPE, session: AsyncSe
                     + [[InlineKeyboardButton("🔁 Retry DM", callback_data=f"bowl:retry:{game.id}")]]
                 ),
             )
-        except TelegramError:
-            pass
+        except Exception as exc:  # noqa: BLE001 - never let a notification failure crash the game
+            logger.warning("Failed to send 'couldn't DM you' fallback for game %s: %s", game.id, exc)
+    except Exception as exc:  # noqa: BLE001 - any other unexpected error while DMing the bowler
+        logger.warning("Unexpected error prompting bowler DM for game %s: %s", game.id, exc)
 
 
 async def bowl_retry_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -369,8 +397,11 @@ async def bowl_number_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         except engine.GameError as exc:
             await query.answer(str(exc), show_alert=True)
             return
-        await query.edit_message_text(bowl_locked_text())
         await query.answer()
+        try:
+            await query.edit_message_text(bowl_locked_text())
+        except Exception as exc:  # noqa: BLE001 - never let this roll back the submitted number
+            logger.warning("Failed to edit bowl-locked DM message for game %s: %s", game.id, exc)
         await _after_submission(context, session, game, resolution)
 
 
@@ -384,18 +415,31 @@ async def _after_submission(context: ContextTypes.DEFAULT_TYPE, session: AsyncSe
     from app.database.models import Ball as BallModel
     from sqlalchemy import select as sa_select
 
+    # CRITICAL: commit the ball resolution right now, BEFORE any Telegram
+    # calls below (GIF/media sends, DM prompts, scoreboard, etc). Everything
+    # after this point only reads what we just committed, so a network
+    # hiccup or unexpected error while notifying players can never roll back
+    # a ball that already happened - that was the root cause of games
+    # getting "confused"/stuck: the group would show ball 1's result, but an
+    # error further down (e.g. a failed get_me() call) would unwind the
+    # whole transaction and silently revert the game's state underneath it.
+    await session.commit()
+
     result = await session.execute(sa_select(BallModel).where(BallModel.game_id == game.id).order_by(BallModel.id))
     all_balls = list(result.scalars().all())
 
-    await log_ball_to_channel(
-        context,
-        game,
-        resolution.ball,
-        resolution.batter.display_name,
-        resolution.bowler.display_name,
-        score_after=resolution.batter.runs,
-        wickets_after=sum(1 for p in resolution.all_players if p.is_out),
-    )
+    try:
+        await log_ball_to_channel(
+            context,
+            game,
+            resolution.ball,
+            resolution.batter.display_name,
+            resolution.bowler.display_name,
+            score_after=resolution.batter.runs,
+            wickets_after=sum(1 for p in resolution.all_players if p.is_out),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to send game log for game %s: %s", game.id, exc)
 
     # Every ball (not just wickets/boundaries) gets its own GIF + revealed
     # numbers message, tagging both the batter and bowler - this is the
@@ -417,16 +461,20 @@ async def _after_submission(context: ContextTypes.DEFAULT_TYPE, session: AsyncSe
     else:
         media_event = media.BATTING
 
-    sent_media = await media.send_event_media(
-        _bound_send_video(context, game.chat_id), media_event, caption=ball_caption
-    )
+    try:
+        sent_media = await media.send_event_media(
+            _bound_send_video(context, game.chat_id), media_event, caption=ball_caption
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to send ball media for game %s: %s", game.id, exc)
+        sent_media = None
     if sent_media is None:
         # No media configured / delivery failed - still send the text so the
         # ball result and tags are never silently dropped.
         try:
             await context.bot.send_message(chat_id=game.chat_id, text=ball_caption, parse_mode="HTML")
-        except TelegramError:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to send ball caption text for game %s: %s", game.id, exc)
 
     if resolution.is_over_complete and not resolution.is_game_over:
         over_balls = [
@@ -441,8 +489,8 @@ async def _after_submission(context: ContextTypes.DEFAULT_TYPE, session: AsyncSe
                 text=scoreboard_text(game, board_batter, resolution.bowler, over_balls),
                 parse_mode="HTML",
             )
-        except TelegramError:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to send scoreboard for game %s: %s", game.id, exc)
 
     if resolution.is_game_over:
         if game.game_type == GameType.TEAM:
@@ -464,21 +512,32 @@ async def _after_submission(context: ContextTypes.DEFAULT_TYPE, session: AsyncSe
     bowler = by_id[game.current_bowler_id]
 
     text = status_text(game, batter, bowler, all_balls, waiting_on_dm=True)
-    bot_username = (await context.bot.get_me()).username
-    kb_rows = number_choice_keyboard("bat", game.id).inline_keyboard + status_message_keyboard(bot_username).inline_keyboard
+    try:
+        bot_username = (await context.bot.get_me()).username
+    except Exception as exc:  # noqa: BLE001 - never let this crash ball resolution
+        logger.warning("get_me() failed while rendering status for game %s: %s", game.id, exc)
+        bot_username = None
+    kb_rows = list(number_choice_keyboard("bat", game.id).inline_keyboard)
+    if bot_username:
+        kb_rows += status_message_keyboard(bot_username).inline_keyboard
     keyboard = InlineKeyboardMarkup(kb_rows)
-    if game.status_message_id:
-        try:
-            await context.bot.edit_message_text(
-                chat_id=game.chat_id, message_id=game.status_message_id, text=text,
-                parse_mode="HTML", reply_markup=keyboard,
-            )
-        except TelegramError:
+    try:
+        if game.status_message_id:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=game.chat_id, message_id=game.status_message_id, text=text,
+                    parse_mode="HTML", reply_markup=keyboard,
+                )
+            except Exception:
+                msg = await context.bot.send_message(chat_id=game.chat_id, text=text, parse_mode="HTML", reply_markup=keyboard)
+                game.status_message_id = msg.message_id
+                await session.commit()
+        else:
             msg = await context.bot.send_message(chat_id=game.chat_id, text=text, parse_mode="HTML", reply_markup=keyboard)
             game.status_message_id = msg.message_id
-    else:
-        msg = await context.bot.send_message(chat_id=game.chat_id, text=text, parse_mode="HTML", reply_markup=keyboard)
-        game.status_message_id = msg.message_id
+            await session.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to post/update status message for game %s: %s", game.id, exc)
 
     # IMPORTANT: also send the batter a brand-new, separate "your turn"
     # ping in the group (with the same number buttons) EVERY ball - editing
@@ -492,8 +551,8 @@ async def _after_submission(context: ContextTypes.DEFAULT_TYPE, session: AsyncSe
             parse_mode="HTML",
             reply_markup=number_choice_keyboard("bat", game.id),
         )
-    except TelegramError:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to send batter-turn ping for game %s: %s", game.id, exc)
 
     # IMPORTANT: prompt the bowler again for EVERY ball while the game is
     # still on - not only when the bowler/batter changes. Within the same
@@ -502,7 +561,7 @@ async def _after_submission(context: ContextTypes.DEFAULT_TYPE, session: AsyncSe
     # "locked" text, so without this the game stalls after ball 1.
     await _prompt_bowler_dm(context, session, game, batter, bowler)
 
-    await session.flush()
+    await session.commit()
 
 
 def _bound_send_video(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
