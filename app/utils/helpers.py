@@ -29,3 +29,12 @@ def over_ball_string(numbers: list[int | str]) -> str:
     if not numbers:
         return "—"
     return " ".join(str(n) for n in numbers)
+
+
+def mention_html(user_id: int, name: str) -> str:
+    """
+    Telegram HTML mention that pings/tags the user even without a username
+    (works via tg://user?id=...). Used to tag the batter/bowler on every
+    resolved ball.
+    """
+    return f'<a href="tg://user?id={user_id}">{safe_html(name)}</a>'
