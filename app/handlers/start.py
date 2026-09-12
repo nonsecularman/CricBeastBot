@@ -1,132 +1,133 @@
-"""
-Builds the python-telegram-bot Application and registers every handler.
-"""
+"""/start, /help, /cancel and the main-menu callback router."""
 from __future__ import annotations
 
 import logging
 
-from telegram import BotCommand
-from telegram.error import TelegramError
-from telegram.ext import (
-    Application,
-    CallbackQueryHandler,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
+from sqlalchemy.ext.asyncio import AsyncSession
+from telegram import Update
+from telegram.ext import ContextTypes
+
+from app.database.database import get_session
+from app.database.models import GameType, User
+from app.game import engine
+from app.keyboards.main import main_menu_keyboard
+from app.utils.helpers import display_name
+from app.utils.permissions import is_authorized_controller
+
+logger = logging.getLogger("cricbeast.start")
+
+WELCOME_TEXT = (
+    "🏏 <b>CricBeastBot</b>\n\n"
+    "Welcome to the premium Telegram cricket experience!\n"
+    "Pick a mode below to get started."
 )
 
-from app.config import settings
-from app.database.database import init_db
-from app.handlers import admin, profile, solo, start, team, tournament
+HELP_TEXT = (
+    "🏏 <b>CricBeastBot — Help</b>\n\n"
+    "<b>General</b>\n"
+    "/start — open the main menu\n"
+    "/help — this message\n"
+    "/cancel — cancel your current action, or stop an active solo game in this chat (creator/admin/owner)\n\n"
+    "<b>Solo Game</b>\n"
+    "/join — join the solo queue\n"
+    "/leavesolo — leave the solo queue\n"
+    "/startsolo — force-start the solo game\n\n"
+    "<b>Team &amp; Tournament</b>\n"
+    "/team — team game menu\n"
+    "/add_a — add a player to Team A (reply to their message, captain/admin only)\n"
+    "/add_b — add a player to Team B (reply to their message, captain/admin only)\n"
+    "/tournament — tournament menu\n\n"
+    "<b>Profile</b>\n"
+    "/profile — your stats\n"
+    "/stats — same as /profile\n"
+    "/halloffame — top players\n"
+)
 
-logger = logging.getLogger("cricbeast.bot")
 
-
-async def _on_startup(application: Application) -> None:
-    await init_db()
-    try:
-        await application.bot.set_my_commands(
-            [
-                BotCommand("start", "Open the main menu"),
-                BotCommand("help", "Show help"),
-                BotCommand("join", "Join the solo queue"),
-                BotCommand("leavesolo", "Leave the solo queue"),
-                BotCommand("startsolo", "Force-start the solo game"),
-                BotCommand("team", "Team game menu"),
-                BotCommand("add_a", "Add a player to Team A (reply to them)"),
-                BotCommand("add_b", "Add a player to Team B (reply to them)"),
-                BotCommand("tournament", "Tournament menu"),
-                BotCommand("profile", "Your player profile"),
-                BotCommand("stats", "Your player profile"),
-                BotCommand("halloffame", "Top players"),
-                BotCommand("cancel", "Cancel current action"),
-            ]
+async def _ensure_user(session: AsyncSession, tg_user) -> None:
+    user = await session.get(User, tg_user.id)
+    if user is None:
+        session.add(
+            User(
+                id=tg_user.id,
+                username=tg_user.username,
+                first_name=tg_user.first_name or "",
+                has_started_dm=False,
+            )
         )
-    except TelegramError as exc:
-        logger.warning("Failed to set bot commands: %s", exc)
-    logger.info("CricBeastBot is up. Owner ID=%s LogChannel=%s", settings.bot_owner_id, settings.log_channel_id)
+    else:
+        user.username = tg_user.username
+        user.first_name = tg_user.first_name or user.first_name
+    await session.flush()
 
 
-async def _on_error(update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Never let one game's error crash the whole bot process.
-    logger.exception("Unhandled exception while processing update: %s", update, exc_info=context.error)
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    tg_user = update.effective_user
+    chat = update.effective_chat
+    async with get_session() as session:
+        await _ensure_user(session, tg_user)
+        if chat and chat.type == "private":
+            user = await session.get(User, tg_user.id)
+            if user:
+                user.has_started_dm = True
+    await update.effective_message.reply_html(WELCOME_TEXT, reply_markup=main_menu_keyboard())
 
 
-def build_application() -> Application:
-    settings.validate()
-    application = Application.builder().token(settings.bot_token).post_init(_on_startup).build()
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.effective_message.reply_html(HELP_TEXT)
 
-    # ---- Commands ---------------------------------------------------- #
-    application.add_handler(CommandHandler("start", start.start_command))
-    application.add_handler(CommandHandler("help", start.help_command))
-    application.add_handler(CommandHandler("cancel", start.cancel_command))
 
-    application.add_handler(CommandHandler("join", solo.join_command))
-    application.add_handler(CommandHandler("leavesolo", solo.leavesolo_command))
-    application.add_handler(CommandHandler("startsolo", solo.startsolo_command))
+async def _cancel_active_game_if_any(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str | None:
+    """
+    Cancels the active solo game in this chat, IF one exists AND the caller
+    is allowed to touch it: the game creator, a group admin, the bot owner,
+    OR any player who actually joined that game (so a stuck/confused game
+    can always be cleared by someone who's actually in it, not only by
+    whoever happens to hold admin rights).
 
-    application.add_handler(CommandHandler("team", team.team_command))
-    application.add_handler(CommandHandler("add_a", team.add_a_command))
-    application.add_handler(CommandHandler("add_b", team.add_b_command))
-    application.add_handler(CommandHandler("tournament", tournament.tournament_command))
+    This exists because before this fix, a stuck/in-progress game had no
+    user-facing way to be cleared - the queue-stage "Cancel Game" button
+    disappears once the game starts, and /cancel only reset local UI state
+    without ever touching the database row.
+    """
+    chat = update.effective_chat
+    user = update.effective_user
+    if chat is None or chat.type == "private":
+        return None
 
-    application.add_handler(CommandHandler("profile", profile.profile_command))
-    application.add_handler(CommandHandler("stats", profile.profile_command))
-    application.add_handler(CommandHandler("halloffame", profile.halloffame_command))
+    async with get_session() as session:
+        game = await engine.get_active_game(session, chat.id, GameType.SOLO)
+        if game is None:
+            return None
 
-    application.add_handler(CommandHandler("admin", admin.admin_command))
-    application.add_handler(CommandHandler("games", admin.games_command))
-    application.add_handler(CommandHandler("stopgame", admin.stopgame_command))
-    application.add_handler(CommandHandler("owner", admin.owner_command))
-    application.add_handler(CommandHandler("cheat", admin.cheat_command))
+        authorized = await is_authorized_controller(update, context, user.id, game.created_by)
+        if not authorized:
+            players = await engine.get_players(session, game.id)
+            authorized = any(p.user_id == user.id for p in players)
 
-    # ---- Main menu ----------------------------------------------------- #
-    application.add_handler(CallbackQueryHandler(start.main_menu_callback, pattern=r"^menu:(main|cancel)$"))
-    application.add_handler(CallbackQueryHandler(solo.solo_menu_callback, pattern=r"^menu:solo$"))
-    application.add_handler(CallbackQueryHandler(team.team_menu_callback, pattern=r"^menu:team$"))
-    application.add_handler(CallbackQueryHandler(tournament.tournament_menu_callback, pattern=r"^menu:tournament$"))
-    application.add_handler(CallbackQueryHandler(profile.halloffame_menu_callback, pattern=r"^menu:halloffame$"))
+        if not authorized:
+            return (
+                "⚠️ There's an active solo game here, but only the game creator, "
+                "a group admin, the bot owner, or a player in that game can cancel it."
+            )
+        await engine.cancel_game(session, game)
+        return "🛑 The active solo game in this chat has been cancelled. Start a fresh one anytime with /start."
 
-    # ---- Solo game ------------------------------------------------------ #
-    # NOTE: solo:spell:N is intercepted by team.match_spell_choice_callback,
-    # which itself falls back to the plain solo flow when no team-match is
-    # pending - see that function for details.
-    application.add_handler(CallbackQueryHandler(team.match_spell_choice_callback, pattern=r"^solo:spell:\d+$"))
-    application.add_handler(CallbackQueryHandler(solo.join_callback, pattern=r"^solo:join:\d+$"))
-    application.add_handler(CallbackQueryHandler(solo.leave_callback, pattern=r"^solo:leave:\d+$"))
-    application.add_handler(CallbackQueryHandler(solo.forcestart_callback, pattern=r"^solo:forcestart:\d+$"))
-    application.add_handler(CallbackQueryHandler(solo.cancelgame_callback, pattern=r"^solo:cancelgame:\d+$"))
-    application.add_handler(CallbackQueryHandler(solo.bat_number_callback, pattern=r"^bat:\d+:\d+$"))
-    application.add_handler(CallbackQueryHandler(solo.bowl_number_callback, pattern=r"^bowl:\d+:\d+$"))
-    application.add_handler(CallbackQueryHandler(solo.bowl_retry_callback, pattern=r"^bowl:retry:\d+$"))
 
-    # ---- Team game -------------------------------------------------- #
-    application.add_handler(CallbackQueryHandler(team.create_team_callback, pattern=r"^team:create$"))
-    application.add_handler(CallbackQueryHandler(team.team_cap_choice_callback, pattern=r"^team:cap:(blue|red)$"))
-    application.add_handler(CallbackQueryHandler(team.join_team_menu_callback, pattern=r"^team:joinmenu$"))
-    application.add_handler(CallbackQueryHandler(team.join_team_callback, pattern=r"^team:join:\d+$"))
-    application.add_handler(CallbackQueryHandler(team.team_list_callback, pattern=r"^team:list$"))
-    application.add_handler(CallbackQueryHandler(team.start_match_menu_callback, pattern=r"^team:startmatch$"))
-    application.add_handler(
-        MessageHandler(team.team_name_filter, team.team_name_message), 1
-    )  # group 1: only fires when context.user_data['awaiting_team_name'] is set
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.clear()
+    extra = await _cancel_active_game_if_any(update, context)
+    await update.effective_message.reply_text(extra or "❌ Cancelled.")
 
-    # ---- Tournament ---------------------------------------------------- #
-    application.add_handler(CallbackQueryHandler(tournament.create_tournament_callback, pattern=r"^tourney:create$"))
-    application.add_handler(CallbackQueryHandler(tournament.browse_tournaments_callback, pattern=r"^tourney:browse$"))
-    application.add_handler(CallbackQueryHandler(tournament.join_tournament_menu_callback, pattern=r"^tourney:joinmenu$"))
-    application.add_handler(CallbackQueryHandler(tournament.join_tournament_callback, pattern=r"^tourney:join:\d+$"))
-    application.add_handler(CallbackQueryHandler(tournament.my_tournament_callback, pattern=r"^tourney:mine$"))
-    application.add_handler(CallbackQueryHandler(tournament.start_tournament_menu_callback, pattern=r"^tourney:startmenu$"))
-    application.add_handler(
-        MessageHandler(tournament.tourney_name_filter, tournament.tourney_name_message), 2
-    )  # group 2: only fires when context.user_data['awaiting_tourney_name'] is set
 
-    # ---- Owner / Admin --------------------------------------------------- #
-    application.add_handler(CallbackQueryHandler(admin.owner_panel_callback, pattern=r"^owner:"))
-    application.add_handler(
-        MessageHandler(admin.owner_input_filter, admin.owner_text_input), 3
-    )  # group 3: only fires when context.user_data['awaiting_owner_input'] is set
-
-    application.add_error_handler(_on_error)
-    return application
+async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles menu:main and menu:cancel - the rest are routed in their own modules."""
+    query = update.callback_query
+    await query.answer()
+    action = query.data.split(":", 1)[1]
+    if action == "main":
+        await query.edit_message_text(WELCOME_TEXT, parse_mode="HTML", reply_markup=main_menu_keyboard())
+    elif action == "cancel":
+        context.user_data.clear()
+        extra = await _cancel_active_game_if_any(update, context)
+        await query.edit_message_text(extra or "❌ Cancelled.")
