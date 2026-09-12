@@ -117,6 +117,7 @@ async def stopgame_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return
         await engine.owner_reset_game(session, game)
         await record_admin_action(session, update.effective_user.id, "stopgame", chat_id=update.effective_chat.id, game_id=game.id)
+        await session.commit()
     await update.effective_message.reply_text("🛑 Game stopped.")
 
 
@@ -156,24 +157,28 @@ async def owner_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         if action == "owner:forcewicket":
             resolution = await engine.owner_force_wicket(session, game)
             await record_admin_action(session, user.id, "force_wicket", chat_id=game.chat_id, game_id=game.id)
+            await session.commit()
             await query.answer("⚡ Wicket forced!")
             await _refresh_after_cheat(context, session, game, resolution)
 
         elif action == "owner:skipball":
             await engine.owner_skip_ball(session, game)
             await record_admin_action(session, user.id, "skip_ball", chat_id=game.chat_id, game_id=game.id)
+            await session.commit()
             await query.answer("⏭️ Ball skipped.")
             await _refresh_status(context, session, game)
 
         elif action == "owner:skipover":
             await engine.owner_skip_over(session, game)
             await record_admin_action(session, user.id, "skip_over", chat_id=game.chat_id, game_id=game.id)
+            await session.commit()
             await query.answer("⏭️ Over skipped.")
             await _refresh_status(context, session, game)
 
         elif action == "owner:reset":
             await engine.owner_reset_game(session, game)
             await record_admin_action(session, user.id, "reset_game", chat_id=game.chat_id, game_id=game.id)
+            await session.commit()
             await query.answer("🔄 Game reset.")
             try:
                 await context.bot.send_message(chat_id=game.chat_id, text="🔄 The game was reset by an admin.")
@@ -183,6 +188,7 @@ async def owner_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         elif action == "owner:end":
             winner = await engine.owner_end_game(session, game)
             await record_admin_action(session, user.id, "end_game", chat_id=game.chat_id, game_id=game.id)
+            await session.commit()
             await query.answer("🛑 Game ended.")
             players = await engine.get_players(session, game.id)
             try:
@@ -195,6 +201,7 @@ async def owner_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         elif action == "owner:lock":
             await engine.owner_set_lock(session, game, not game.locked)
             await record_admin_action(session, user.id, "toggle_lock", detail=str(not game.locked), chat_id=game.chat_id, game_id=game.id)
+            await session.commit()
             await query.answer("🔐 Lock toggled: " + ("ON" if game.locked else "OFF"))
 
         elif action == "owner:view":
@@ -229,6 +236,7 @@ async def owner_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         elif action == "owner:forceresult":
             winner = await engine.owner_end_game(session, game)
             await record_admin_action(session, user.id, "force_result", chat_id=game.chat_id, game_id=game.id)
+            await session.commit()
             await query.answer("🎯 Result forced.")
             players = await engine.get_players(session, game.id)
             try:
@@ -269,6 +277,7 @@ async def owner_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 return
             batter = await engine.owner_add_runs(session, game, runs)
             await record_admin_action(session, update.effective_user.id, "add_runs", detail=str(runs), chat_id=game.chat_id, game_id=game.id)
+            await session.commit()
             await update.effective_message.reply_text(f"💰 {batter.display_name} now has {batter.runs} runs.")
             await _refresh_status(context, session, game)
 
@@ -284,6 +293,7 @@ async def owner_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 await update.effective_message.reply_text(f"⚠️ {exc}")
                 return
             await record_admin_action(session, update.effective_user.id, "set_player", detail=str(target_id), chat_id=game.chat_id, game_id=game.id)
+            await session.commit()
             await update.effective_message.reply_text(f"👤 Current batter set to {player.display_name}.")
             await _refresh_status(context, session, game)
 
@@ -293,6 +303,7 @@ async def owner_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 "for guaranteed outcomes on the next ball."
             )
             await record_admin_action(session, update.effective_user.id, "set_number", detail=text, chat_id=game.chat_id, game_id=game.id)
+            await session.commit()
 
 
 owner_input_filter = filters.TEXT & ~filters.COMMAND
