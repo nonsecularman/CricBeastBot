@@ -19,7 +19,7 @@ from app.game import engine
 from app.game.render import final_result_text, status_text
 from app.keyboards.admin import owner_panel_keyboard
 from app.services.logger import record_admin_action
-from app.utils.permissions import is_owner
+from app.utils.permissions import is_admin_or_owner, is_owner
 
 
 def _owner_only(func):
@@ -31,6 +31,24 @@ def _owner_only(func):
                 await update.callback_query.answer("⚠️ Owner only.", show_alert=True)
             else:
                 await update.effective_message.reply_text("⚠️ This command is restricted to the bot owner.")
+            return
+        return await func(update, context)
+
+    return wrapper
+
+
+def _admin_only(func):
+    """
+    Group-admin tier (per the bot's command spec, /admin, /games and
+    /stopgame are Admin-level, not Owner-only) - the bot owner always
+    passes too.
+    """
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        if not await is_admin_or_owner(update, context, user.id):
+            await update.effective_message.reply_text(
+                "⚠️ This command is restricted to group admins or the bot owner."
+            )
             return
         return await func(update, context)
 
@@ -51,7 +69,7 @@ async def owner_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 cheat_command = owner_command
 
 
-@_owner_only
+@_admin_only
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     async with get_session() as session:
         result = await session.execute(
@@ -67,6 +85,9 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 @_owner_only
 async def games_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Owner-only (not just admin-tier): this lists active games across EVERY
+    # chat the bot is in, which would leak other groups' chat IDs/activity
+    # to a random group admin if opened up like /admin and /stopgame are.
     async with get_session() as session:
         result = await session.execute(
             select(Game).where(Game.status.in_([GameStatus.QUEUE, GameStatus.IN_PROGRESS]))
@@ -79,7 +100,7 @@ async def games_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.effective_message.reply_text("🌍 Active games:\n" + "\n".join(lines))
 
 
-@_owner_only
+@_admin_only
 async def stopgame_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     async with get_session() as session:
         result = await session.execute(
