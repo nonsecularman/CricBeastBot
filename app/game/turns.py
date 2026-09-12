@@ -13,6 +13,18 @@ def next_batter(players: list[GamePlayer], current_batter_id: int | None) -> Gam
     return candidates[0]
 
 
+def next_batter_after_wicket(players: list[GamePlayer], out_bowler_id: int) -> GamePlayer | None:
+    """
+    After a wicket, the player who was JUST bowling gets to bat next (if
+    they haven't already had their turn) - only falling back to the normal
+    join-order queue once the current bowler has already batted or is out.
+    """
+    bowler_player = next((p for p in players if p.user_id == out_bowler_id), None)
+    if bowler_player is not None and not bowler_player.is_out and not bowler_player.has_batted:
+        return bowler_player
+    return next_batter(players, None)
+
+
 def next_bowler(players: list[GamePlayer], batter_id: int, current_bowler_id: int | None) -> GamePlayer | None:
     """
     Pick the next bowler: preferring whoever has bowled the fewest overs so
