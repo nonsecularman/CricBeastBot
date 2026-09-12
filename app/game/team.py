@@ -24,18 +24,47 @@ from app.database.models import (
 )
 from app.game import engine
 
+MAX_TEAM_SIZE = 11
+
+CAP_LABELS = {"blue": "🔵 Blue Cap", "red": "🔴 Red Cap"}
+CAP_EMOJI = {"blue": "🔵", "red": "🔴"}
+
 
 class TeamError(Exception):
     pass
 
 
-async def create_team(session: AsyncSession, chat_id: int, name: str, captain_id: int, captain_name: str) -> Team:
+async def get_team_by_slot(session: AsyncSession, chat_id: int, slot: str) -> Team | None:
+    result = await session.execute(select(Team).where(Team.chat_id == chat_id, Team.slot == slot))
+    return result.scalars().first()
+
+
+async def get_match_teams(session: AsyncSession, chat_id: int) -> tuple[Team | None, Team | None]:
+    """Returns (Team A, Team B) for this chat - either may be None if not created yet."""
+    return (
+        await get_team_by_slot(session, chat_id, "A"),
+        await get_team_by_slot(session, chat_id, "B"),
+    )
+
+
+async def create_team(
+    session: AsyncSession, chat_id: int, name: str, captain_id: int, captain_name: str, cap_color: str
+) -> Team:
+    if cap_color not in CAP_LABELS:
+        raise TeamError("Invalid cap color.")
+    team_a, team_b = await get_match_teams(session, chat_id)
+    if team_a is not None and team_b is not None:
+        raise TeamError("Team A and Team B already exist in this chat. Ask an admin to reset teams first.")
+    slot = "A" if team_a is None else "B"
+    taken_colors = {t.cap_color for t in (team_a, team_b) if t is not None}
+    if cap_color in taken_colors:
+        raise TeamError(f"{CAP_LABELS[cap_color]} is already taken in this chat - pick the other cap.")
     existing = await session.execute(
         select(Team).where(Team.chat_id == chat_id, Team.name.ilike(name))
     )
     if existing.scalars().first() is not None:
         raise TeamError(f"A team named '{name}' already exists in this chat.")
-    team = Team(chat_id=chat_id, name=name, captain_id=captain_id)
+    team = Team(chat_id=chat_id, name=name, captain_id=captain_id, slot=slot, cap_color=cap_color)
     session.add(team)
     await session.flush()
     session.add(
@@ -64,6 +93,8 @@ async def join_team(session: AsyncSession, team: Team, user_id: int, display_nam
         if any(m.user_id == user_id for m in members):
             raise TeamError("You're already on a team in this chat.")
     members = await get_team_players(session, team.id)
+    if len(members) >= MAX_TEAM_SIZE:
+        raise TeamError(f"🏏 {team.name} is already full ({MAX_TEAM_SIZE}/{MAX_TEAM_SIZE} players).")
     player = TeamPlayer(team_id=team.id, user_id=user_id, display_name=display_name, batting_order=len(members))
     session.add(player)
     await session.flush()
