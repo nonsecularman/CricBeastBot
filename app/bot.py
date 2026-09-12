@@ -33,6 +33,8 @@ async def _on_startup(application: Application) -> None:
                 BotCommand("leavesolo", "Leave the solo queue"),
                 BotCommand("startsolo", "Force-start the solo game"),
                 BotCommand("team", "Team game menu"),
+                BotCommand("add_a", "Add a player to Team A (reply to them)"),
+                BotCommand("add_b", "Add a player to Team B (reply to them)"),
                 BotCommand("tournament", "Tournament menu"),
                 BotCommand("profile", "Your player profile"),
                 BotCommand("stats", "Your player profile"),
@@ -64,6 +66,8 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("startsolo", solo.startsolo_command))
 
     application.add_handler(CommandHandler("team", team.team_command))
+    application.add_handler(CommandHandler("add_a", team.add_a_command))
+    application.add_handler(CommandHandler("add_b", team.add_b_command))
     application.add_handler(CommandHandler("tournament", tournament.tournament_command))
 
     application.add_handler(CommandHandler("profile", profile.profile_command))
@@ -98,11 +102,11 @@ def build_application() -> Application:
 
     # ---- Team game -------------------------------------------------- #
     application.add_handler(CallbackQueryHandler(team.create_team_callback, pattern=r"^team:create$"))
+    application.add_handler(CallbackQueryHandler(team.team_cap_choice_callback, pattern=r"^team:cap:(blue|red)$"))
     application.add_handler(CallbackQueryHandler(team.join_team_menu_callback, pattern=r"^team:joinmenu$"))
     application.add_handler(CallbackQueryHandler(team.join_team_callback, pattern=r"^team:join:\d+$"))
     application.add_handler(CallbackQueryHandler(team.team_list_callback, pattern=r"^team:list$"))
     application.add_handler(CallbackQueryHandler(team.start_match_menu_callback, pattern=r"^team:startmatch$"))
-    application.add_handler(CallbackQueryHandler(team.pick_team_callback, pattern=r"^team:pick:\d+$"))
     application.add_handler(
         MessageHandler(team.team_name_filter, team.team_name_message), 1
     )  # group 1: only fires when context.user_data['awaiting_team_name'] is set
