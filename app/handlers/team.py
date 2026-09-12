@@ -7,15 +7,14 @@ from __future__ import annotations
 import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from telegram import InlineKeyboardMarkup, Update
-from telegram.error import TelegramError
+from telegram import Update
 from telegram.ext import ContextTypes, filters
 
 from app.database.database import get_session
 from app.database.models import MatchStatus, TeamMatch
 from app.game import engine, team as team_engine
-from app.game.render import status_text
-from app.keyboards.game import number_choice_keyboard, spell_choice_keyboard, status_message_keyboard
+from app.handlers.solo import _announce_game_start
+from app.keyboards.game import spell_choice_keyboard
 from app.keyboards.team import team_join_keyboard, team_menu_keyboard, team_start_match_keyboard
 from app.services.leaderboard import apply_match_result
 from app.utils.helpers import display_name
@@ -144,9 +143,9 @@ async def start_match_menu_callback(update: Update, context: ContextTypes.DEFAUL
         return
     context.user_data.pop("match_team_a", None)
     await query.edit_message_text(
-        "⚔️ <b>Start Match</b>\n\nPick Team A:",
+        "⚔️ <b>Start Match</b>\n\n🅰️ Pick Team A:",
         parse_mode="HTML",
-        reply_markup=team_start_match_keyboard([(t.id, t.name) for t in teams]),
+        reply_markup=team_start_match_keyboard([(t.id, t.name) for t in teams], slot_emoji="🅰️"),
     )
 
 
@@ -160,7 +159,9 @@ async def pick_team_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         remaining = [(t.id, t.name) for t in teams if t.id != team_id]
         await query.answer()
         await query.edit_message_text(
-            "⚔️ Pick Team B:", reply_markup=team_start_match_keyboard(remaining)
+            "🅱️ Pick Team B:",
+            parse_mode="HTML",
+            reply_markup=team_start_match_keyboard(remaining, slot_emoji="🅱️"),
         )
         return
 
@@ -168,9 +169,14 @@ async def pick_team_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     team_b_id = team_id
     context.user_data["match_team_b"] = team_b_id
     context.user_data["match_team_a_final"] = team_a_id
+    async with get_session() as session:
+        team_a = await team_engine.get_team(session, team_a_id)
+        team_b = await team_engine.get_team(session, team_b_id)
     await query.answer()
     await query.edit_message_text(
-        "⚖️ Choose Spell (balls per over):", reply_markup=spell_choice_keyboard()
+        f"🅰️ {team_a.name} 🆚 🅱️ {team_b.name}\n\n⚖️ Choose Spell (balls per over):",
+        parse_mode="HTML",
+        reply_markup=spell_choice_keyboard(),
     )
     context.user_data["awaiting_match_spell"] = True
 
@@ -196,27 +202,16 @@ async def match_spell_choice_callback(update: Update, context: ContextTypes.DEFA
             match = await team_engine.create_match(
                 session, update.effective_chat.id, team_a, team_b, balls_per_over
             )
-        except team_engine.TeamError as exc:
+            game, batter, bowler = await team_engine.start_innings(session, match, team_a.id, team_b.id)
+        except (team_engine.TeamError, engine.GameError) as exc:
             await query.answer(str(exc), show_alert=True)
             return
-        game, batter, bowler = await team_engine.start_innings(session, match, team_a.id, team_b.id)
         await query.answer("⚔️ Match started!")
-        text = (
-            f"⚔️ <b>{team_a.name}</b> vs <b>{team_b.name}</b>\n"
-            f"🏏 {team_a.name} batting first!\n\n" + status_text(game, batter, bowler, [], waiting_on_dm=True)
+        intro = (
+            f"⚔️ <b>{team_a.name} 🆚 {team_b.name}</b>\n"
+            f"🏏 {team_a.name} batting first!\n\n"
         )
-        bot_username = (await context.bot.get_me()).username
-        kb_rows = number_choice_keyboard("bat", game.id).inline_keyboard + status_message_keyboard(bot_username).inline_keyboard
-        msg = await context.bot.send_message(
-            chat_id=update.effective_chat.id, text=text, parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(kb_rows),
-        )
-        game.status_message_id = msg.message_id
-        await session.flush()
-
-        from app.handlers.solo import _prompt_bowler_dm
-
-        await _prompt_bowler_dm(context, session, game, batter, bowler)
+        await _announce_game_start(context, session, game, batter, bowler, intro_text=intro)
 
 
 # --------------------------------------------------------------------------- #
@@ -233,35 +228,28 @@ async def handle_team_innings_over(context: ContextTypes.DEFAULT_TYPE, session: 
         else:
             match.team_b_score = total
         match.current_innings = 2
-        await session.flush()
+        await session.commit()
 
         team_a = await team_engine.get_team(session, match.team_a_id)
         team_b = await team_engine.get_team(session, match.team_b_id)
+        first_innings_team_name = team_a.name if batting_team_id == match.team_a_id else team_b.name
+        second_innings_team_name = team_b.name if batting_team_id == match.team_a_id else team_a.name
         try:
             await context.bot.send_message(
                 chat_id=game.chat_id,
                 text=(
                     f"🏁 <b>Innings Break</b>\n\n"
-                    f"{team_a.name if batting_team_id == match.team_a_id else team_b.name} scored "
-                    f"<b>{total}</b> runs.\n\nNow {team_b.name if batting_team_id == match.team_a_id else team_a.name} bats!"
+                    f"{first_innings_team_name} scored <b>{total}</b> runs.\n\n"
+                    f"Now {second_innings_team_name} bats! Target: <b>{total + 1}</b> 🎯"
                 ),
                 parse_mode="HTML",
             )
-        except TelegramError:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to send innings-break message for match %s: %s", match.id, exc)
 
         game2, batter2, bowler2 = await team_engine.start_innings(session, match, bowling_team_id, batting_team_id)
-        bot_username = (await context.bot.get_me()).username
-        kb_rows = number_choice_keyboard("bat", game2.id).inline_keyboard + status_message_keyboard(bot_username).inline_keyboard
-        text2 = status_text(game2, batter2, bowler2, [], waiting_on_dm=True)
-        msg = await context.bot.send_message(
-            chat_id=game.chat_id, text=text2, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb_rows)
-        )
-        game2.status_message_id = msg.message_id
-        await session.flush()
-        from app.handlers.solo import _prompt_bowler_dm
-
-        await _prompt_bowler_dm(context, session, game2, batter2, bowler2)
+        intro2 = f"⚔️ <b>{second_innings_team_name} chasing {total + 1}</b>\n\n"
+        await _announce_game_start(context, session, game2, batter2, bowler2, intro_text=intro2)
         return
 
     # Second innings just finished - finalize the match.
@@ -275,7 +263,10 @@ async def handle_team_innings_over(context: ContextTypes.DEFAULT_TYPE, session: 
     if match.team_a_score == match.team_b_score:
         winner_team_id = None
     match.winner_team_id = winner_team_id
-    await session.flush()
+    # Commit the match result FIRST, before any Telegram sends or stat
+    # updates below - a notify-phase hiccup must never roll back a finished
+    # match back to "in progress".
+    await session.commit()
 
     team_a = await team_engine.get_team(session, match.team_a_id)
     team_b = await team_engine.get_team(session, match.team_b_id)
@@ -293,8 +284,8 @@ async def handle_team_innings_over(context: ContextTypes.DEFAULT_TYPE, session: 
     )
     try:
         await context.bot.send_message(chat_id=game.chat_id, text=text, parse_mode="HTML")
-    except TelegramError:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to send match-over message for match %s: %s", match.id, exc)
 
     for team_id, won in (
         (match.team_a_id, winner_team_id == match.team_a_id),
@@ -311,7 +302,7 @@ async def handle_team_innings_over(context: ContextTypes.DEFAULT_TYPE, session: 
                 won=won,
                 highest_score_candidate=0,
             )
-    await session.flush()
+    await session.commit()
 
 
 async def _innings_team_ids(session: AsyncSession, game, match: TeamMatch) -> tuple[int, int]:
