@@ -255,7 +255,9 @@ async def _try_resolve(session: AsyncSession, game: Game) -> BallResolution | No
 
     if is_wicket:
         batter.has_batted = True
-        candidate = turn_logic.next_batter(players, batter.user_id)
+        # The bowler who just took the wicket gets to bat next (falls back
+        # to normal queue order once that bowler has already had a turn).
+        candidate = turn_logic.next_batter_after_wicket(players, bowler.user_id)
         if candidate is None:
             is_game_over = True
         else:
@@ -266,12 +268,16 @@ async def _try_resolve(session: AsyncSession, game: Game) -> BallResolution | No
         bowler.overs_bowled += 1
         game.current_over += 1
         game.balls_this_over = 0
-        if not is_game_over:
-            active_batter_id = next_batter.user_id if next_batter else batter.user_id
-            candidate_bowler = turn_logic.next_bowler(players, active_batter_id, bowler.user_id)
-            if candidate_bowler is not None:
-                next_bowler = candidate_bowler
-                game.current_bowler_id = candidate_bowler.user_id
+
+    # Bowler rotation: needed whenever the over just completed, OR whenever
+    # a wicket changed who's batting - either way the previous bowler can't
+    # (or shouldn't) keep bowling to whoever's up next.
+    if not is_game_over and (is_over_complete or next_batter is not None):
+        active_batter_id = next_batter.user_id if next_batter else batter.user_id
+        candidate_bowler = turn_logic.next_bowler(players, active_batter_id, bowler.user_id)
+        if candidate_bowler is not None:
+            next_bowler = candidate_bowler
+            game.current_bowler_id = candidate_bowler.user_id
 
     if not is_game_over and turn_logic.all_batters_done(players):
         is_game_over = True
@@ -348,17 +354,17 @@ async def owner_force_wicket(session: AsyncSession, game: Game) -> BallResolutio
     game.pending_bowler_number = None
 
     is_over_complete = game.balls_this_over >= game.balls_per_over
-    candidate = turn_logic.next_batter(players, batter.user_id)
+    candidate = turn_logic.next_batter_after_wicket(players, bowler.user_id)
     is_game_over = candidate is None
     next_bowler = None
     if is_over_complete:
         bowler.overs_bowled += 1
         game.current_over += 1
         game.balls_this_over = 0
-        if not is_game_over:
-            next_bowler = turn_logic.next_bowler(players, candidate.user_id, bowler.user_id)
-            if next_bowler:
-                game.current_bowler_id = next_bowler.user_id
+    if not is_game_over:
+        next_bowler = turn_logic.next_bowler(players, candidate.user_id, bowler.user_id)
+        if next_bowler:
+            game.current_bowler_id = next_bowler.user_id
 
     winner = None
     if is_game_over:
