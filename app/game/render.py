@@ -130,5 +130,15 @@ def bowler_dm_text(game: Game, batter: GamePlayer, bowler_score_line: str) -> st
     )
 
 
+def batter_turn_text(batter: GamePlayer) -> str:
+    """
+    Sent as a brand-new group message (never an edit) so the batter actually
+    gets a Telegram notification/ping for their turn - mirroring the fresh
+    DM the bowler gets each ball. Edited messages don't trigger pings even
+    if a mention is inside them, which is why this has to be its own send.
+    """
+    return f"👉 {mention_html(batter.user_id, batter.display_name)}, it's your turn to bat! 🏏 Pick a number below."
+
+
 def bowl_locked_text() -> str:
     return "✅ Your bowl has been locked.\n\nWait for the batter..."
