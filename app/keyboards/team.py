@@ -14,19 +14,28 @@ def team_menu_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def team_join_keyboard(teams: list[tuple[int, str]]) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(f"🏏 {name}", callback_data=f"team:join:{team_id}")]
-        for team_id, name in teams
-    ]
+def team_cap_choice_keyboard(exclude: set[str] | None = None) -> InlineKeyboardMarkup:
+    """Cap picker for team creation. `exclude` removes a color already taken
+    by the other team in this chat (Team A and Team B can never share a cap)."""
+    exclude = exclude or set()
+    row = []
+    if "blue" not in exclude:
+        row.append(InlineKeyboardButton("🔵 Blue Cap", callback_data="team:cap:blue"))
+    if "red" not in exclude:
+        row.append(InlineKeyboardButton("🔴 Red Cap", callback_data="team:cap:red"))
+    rows = [row] if row else []
     rows.append([InlineKeyboardButton("🔙 Back", callback_data="menu:team")])
     return InlineKeyboardMarkup(rows)
 
 
-def team_start_match_keyboard(teams: list[tuple[int, str]], slot_emoji: str = "🏏") -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(f"{slot_emoji} {name}", callback_data=f"team:pick:{team_id}")]
-        for team_id, name in teams
-    ]
+def team_join_keyboard(team_a, team_b) -> InlineKeyboardMarkup:
+    """team_a / team_b are Team ORM objects (or None if not created yet)."""
+    rows = []
+    if team_a is not None:
+        emoji = "🔵" if team_a.cap_color == "blue" else "🔴"
+        rows.append([InlineKeyboardButton(f"{emoji} TEAM A — {team_a.name}", callback_data=f"team:join:{team_a.id}")])
+    if team_b is not None:
+        emoji = "🔵" if team_b.cap_color == "blue" else "🔴"
+        rows.append([InlineKeyboardButton(f"{emoji} TEAM B — {team_b.name}", callback_data=f"team:join:{team_b.id}")])
     rows.append([InlineKeyboardButton("🔙 Back", callback_data="menu:team")])
     return InlineKeyboardMarkup(rows)
