@@ -5,7 +5,7 @@ message text used in the group status message and scoreboards.
 from __future__ import annotations
 
 from app.database.models import Ball, Game, GamePlayer
-from app.utils.helpers import SEPARATOR, over_ball_string
+from app.utils.helpers import SEPARATOR, mention_html, over_ball_string
 
 
 def solo_queue_text(game: Game, players: list[GamePlayer]) -> str:
@@ -34,23 +34,62 @@ def _current_over_balls(balls: list[Ball], over_number: int) -> list[int | str]:
 def status_text(game: Game, batter: GamePlayer, bowler: GamePlayer, balls: list[Ball], waiting_on_dm: bool) -> str:
     header = (
         "📊 <b>Status:</b>\n"
-        f"🏏 Batter: {batter.display_name} ({batter.runs} off {batter.balls_faced})\n"
-        f"🥎 Bowler: {bowler.display_name} "
+        f"🏏 Batter: {mention_html(batter.user_id, batter.display_name)} ({batter.runs} off {batter.balls_faced})\n"
+        f"🥎 Bowler: {mention_html(bowler.user_id, bowler.display_name)} "
         f"(Over: {game.balls_this_over}/{game.balls_per_over} balls)"
     )
     this_over = _current_over_balls(balls, game.current_over)
     over_line = f"\nOver {game.current_over}: {over_ball_string(this_over)}"
-    footer = f"\n\n👉 {bowler.display_name}, check your DM to bowl! 🤫🥎" if waiting_on_dm else ""
+    footer = (
+        f"\n\n👉 {mention_html(bowler.user_id, bowler.display_name)}, check your DM to bowl! 🤫🥎"
+        if waiting_on_dm
+        else ""
+    )
     return header + over_line + footer
 
 
 def wicket_text(batter: GamePlayer) -> str:
     return (
         "💥 <b>WICKET!</b>\n\n"
-        f"🏏 {batter.display_name} is OUT!\n\n"
+        f"🏏 {mention_html(batter.user_id, batter.display_name)} is OUT!\n\n"
         f"Score:\n{batter.runs} runs\n\n"
         f"Balls:\n{batter.balls_faced}"
     )
+
+
+def ball_result_text(
+    batter: GamePlayer,
+    bowler: GamePlayer,
+    batter_number: int,
+    bowler_number: int,
+    runs: int,
+    is_wicket: bool,
+) -> str:
+    """
+    The per-ball 'both numbers revealed' message that goes out with the GIF
+    right after a ball is resolved - tags both players, exactly like the
+    reference gameplay: bowler delivery + batter hit, then the outcome line.
+    """
+    header = (
+        "🎾 <b>Ball delivered!</b> 🎾\n\n"
+        f"🥎 Bowler delivery: <b>{bowler_number}</b>\n"
+        f"🏏 Batter hit: <b>{batter_number}</b>\n\n"
+    )
+    batter_tag = mention_html(batter.user_id, batter.display_name)
+    bowler_tag = mention_html(bowler.user_id, bowler.display_name)
+    if is_wicket:
+        outcome = (
+            "💥 <b>HOWZAT! OUT!</b> ❌❌\n"
+            f"{batter_tag} is dismissed for {batter.runs}!\n"
+            f"🥎 Well bowled, {bowler_tag}!"
+        )
+    elif runs == 6:
+        outcome = f"🚀 <b>SIX!</b> {batter_tag} smashes it out of the park!"
+    elif runs == 4:
+        outcome = f"🔥 <b>FOUR!</b> {batter_tag} finds the boundary!"
+    else:
+        outcome = f"🏏 {batter_tag} takes <b>{runs}</b> run{'s' if runs != 1 else ''} off {bowler_tag}."
+    return header + outcome
 
 
 def scoreboard_text(game: Game, batter: GamePlayer, bowler: GamePlayer, over_balls: list[int | str]) -> str:
