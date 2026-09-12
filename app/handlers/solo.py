@@ -254,6 +254,23 @@ async def cancelgame_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 # --------------------------------------------------------------------------- #
 async def _launch_game(update: Update, context: ContextTypes.DEFAULT_TYPE, session: AsyncSession, game: Game) -> None:
     batter, bowler = await engine.start_game(session, game)
+    await _announce_game_start(context, session, game, batter, bowler)
+
+
+async def _announce_game_start(
+    context: ContextTypes.DEFAULT_TYPE,
+    session: AsyncSession,
+    game: Game,
+    batter: GamePlayer,
+    bowler: GamePlayer,
+    intro_text: str = "",
+) -> None:
+    """
+    Shared "first ball of a game" announcement - used by Solo (_launch_game)
+    AND Team Game (each innings launch in app/handlers/team.py), so both game
+    modes get the exact same reliable behaviour: commit-before-notify, the
+    batter's fresh group ping, and the bowler's DM prompt.
+    """
     # CRITICAL: commit the game-start transaction right now, BEFORE any
     # Telegram calls below. Everything in this function only reads what we
     # just committed, so any hiccup while sending messages (network blip,
@@ -269,7 +286,7 @@ async def _launch_game(update: Update, context: ContextTypes.DEFAULT_TYPE, sessi
         bot_username = None
 
     balls = []
-    text = status_text(game, batter, bowler, balls, waiting_on_dm=True)
+    text = intro_text + status_text(game, batter, bowler, balls, waiting_on_dm=True)
     kb_rows = list(number_choice_keyboard("bat", game.id).inline_keyboard)
     if bot_username:
         kb_rows += status_message_keyboard(bot_username).inline_keyboard
