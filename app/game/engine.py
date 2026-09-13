@@ -78,6 +78,25 @@ async def get_active_game(session: AsyncSession, chat_id: int, game_type: GameTy
     return result.scalars().first()
 
 
+async def get_game_awaiting_batter(session: AsyncSession, chat_id: int, user_id: int) -> Game | None:
+    """
+    Finds the in-progress game (any type - solo or team) in this chat where
+    it's currently user_id's turn to bat. Used so a plain "1"-"6" text
+    message typed in the group can be treated as the batter's shot, without
+    needing inline buttons.
+    """
+    result = await session.execute(
+        select(Game)
+        .where(
+            Game.chat_id == chat_id,
+            Game.status == GameStatus.IN_PROGRESS,
+            Game.current_batter_id == user_id,
+        )
+        .order_by(Game.id.desc())
+    )
+    return result.scalars().first()
+
+
 async def create_solo_game(session: AsyncSession, chat_id: int, creator_id: int, balls_per_over: int) -> Game:
     existing = await get_active_game(session, chat_id, GameType.SOLO)
     if existing is not None:
