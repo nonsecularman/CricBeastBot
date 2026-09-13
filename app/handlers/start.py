@@ -36,6 +36,7 @@ HELP_TEXT = (
     "/team — team game menu\n"
     "/add_a — add a player to Team A (reply to their message, captain/admin only)\n"
     "/add_b — add a player to Team B (reply to their message, captain/admin only)\n"
+    "/resetteams — clear Team A/B in this chat (admin/owner only)\n"
     "/tournament — tournament menu\n\n"
     "<b>Profile</b>\n"
     "/profile — your stats\n"
