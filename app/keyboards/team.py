@@ -6,6 +6,7 @@ def team_menu_keyboard() -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("➕ Create Team", callback_data="team:create")],
             [InlineKeyboardButton("🚪 Join Team", callback_data="team:joinmenu")],
+            [InlineKeyboardButton("🗑️ Delete Team", callback_data="team:deletemenu")],
             [InlineKeyboardButton("⚔️ Start Match", callback_data="team:startmatch")],
             [InlineKeyboardButton("📋 Team List", callback_data="team:list")],
             [InlineKeyboardButton("🔙 Main Menu", callback_data="menu:main")],
@@ -14,16 +15,17 @@ def team_menu_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def team_cap_choice_keyboard(exclude: set[str] | None = None) -> InlineKeyboardMarkup:
-    """Cap picker for team creation. `exclude` removes a color already taken
-    by the other team in this chat (Team A and Team B can never share a cap)."""
-    exclude = exclude or set()
-    row = []
-    if "blue" not in exclude:
-        row.append(InlineKeyboardButton("🔵 Blue Cap", callback_data="team:cap:blue"))
-    if "red" not in exclude:
-        row.append(InlineKeyboardButton("🔴 Red Cap", callback_data="team:cap:red"))
-    rows = [row] if row else []
+def team_create_choice_keyboard(team_a_exists: bool, team_b_exists: bool) -> InlineKeyboardMarkup:
+    """
+    One button per free slot - picking it decides the cap AND the slot
+    together in a single tap: Team A is always Blue Cap, Team B is always
+    Red Cap.
+    """
+    rows = []
+    if not team_a_exists:
+        rows.append([InlineKeyboardButton("🔵 Create Team A (Blue Cap)", callback_data="team:createslot:A")])
+    if not team_b_exists:
+        rows.append([InlineKeyboardButton("🔴 Create Team B (Red Cap)", callback_data="team:createslot:B")])
     rows.append([InlineKeyboardButton("🔙 Back", callback_data="menu:team")])
     return InlineKeyboardMarkup(rows)
 
@@ -32,10 +34,19 @@ def team_join_keyboard(team_a, team_b) -> InlineKeyboardMarkup:
     """team_a / team_b are Team ORM objects (or None if not created yet)."""
     rows = []
     if team_a is not None:
-        emoji = "🔵" if team_a.cap_color == "blue" else "🔴"
-        rows.append([InlineKeyboardButton(f"{emoji} TEAM A — {team_a.name}", callback_data=f"team:join:{team_a.id}")])
+        rows.append([InlineKeyboardButton(f"🔵 TEAM A — {team_a.name}", callback_data=f"team:join:{team_a.id}")])
     if team_b is not None:
-        emoji = "🔵" if team_b.cap_color == "blue" else "🔴"
-        rows.append([InlineKeyboardButton(f"{emoji} TEAM B — {team_b.name}", callback_data=f"team:join:{team_b.id}")])
+        rows.append([InlineKeyboardButton(f"🔴 TEAM B — {team_b.name}", callback_data=f"team:join:{team_b.id}")])
+    rows.append([InlineKeyboardButton("🔙 Back", callback_data="menu:team")])
+    return InlineKeyboardMarkup(rows)
+
+
+def team_delete_keyboard(team_a, team_b) -> InlineKeyboardMarkup:
+    """team_a / team_b are Team ORM objects (or None if not created yet)."""
+    rows = []
+    if team_a is not None:
+        rows.append([InlineKeyboardButton(f"🗑️ Delete Team A — {team_a.name}", callback_data=f"team:delete:{team_a.id}")])
+    if team_b is not None:
+        rows.append([InlineKeyboardButton(f"🗑️ Delete Team B — {team_b.name}", callback_data=f"team:delete:{team_b.id}")])
     rows.append([InlineKeyboardButton("🔙 Back", callback_data="menu:team")])
     return InlineKeyboardMarkup(rows)
