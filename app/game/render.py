@@ -137,7 +137,7 @@ def batter_turn_text(batter: GamePlayer) -> str:
     DM the bowler gets each ball. Edited messages don't trigger pings even
     if a mention is inside them, which is why this has to be its own send.
     """
-    return f"👉 {mention_html(batter.user_id, batter.display_name)}, it's your turn to bat! 🏏 Pick a number below."
+    return f"👉 {mention_html(batter.user_id, batter.display_name)}, it's your turn to bat! 🏏 Type a number (1-6) to hit!"
 
 
 def bowl_locked_text() -> str:
