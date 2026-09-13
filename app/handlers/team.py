@@ -222,6 +222,30 @@ async def add_b_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await _add_to_team_command(update, context, "B")
 
 
+async def reset_teams_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Deletes Team A and Team B (and their rosters) for this chat, so a new
+    Create Team flow can start clean. Group-admin/owner only - this throws
+    away the current teams' rosters."""
+    if update.effective_chat.type == "private":
+        await update.effective_message.reply_text("⚠️ This only works in a group chat.")
+        return
+    user = update.effective_user
+    if not await is_admin_or_owner(update, context, user.id):
+        await update.effective_message.reply_text(
+            "⚠️ Only a group admin or the bot owner can reset teams."
+        )
+        return
+    async with get_session() as session:
+        removed = await team_engine.reset_teams(session, update.effective_chat.id)
+        await session.commit()
+    if removed:
+        await update.effective_message.reply_text(
+            f"🔄 Cleared {removed} team(s) in this chat. You can create fresh Team A / Team B now."
+        )
+    else:
+        await update.effective_message.reply_text("There were no teams to clear in this chat.")
+
+
 # --------------------------------------------------------------------------- #
 # Team list
 # --------------------------------------------------------------------------- #
