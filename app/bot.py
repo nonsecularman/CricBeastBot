@@ -104,9 +104,11 @@ def build_application() -> Application:
 
     # ---- Team game -------------------------------------------------- #
     application.add_handler(CallbackQueryHandler(team.create_team_callback, pattern=r"^team:create$"))
-    application.add_handler(CallbackQueryHandler(team.team_cap_choice_callback, pattern=r"^team:cap:(blue|red)$"))
+    application.add_handler(CallbackQueryHandler(team.create_team_slot_callback, pattern=r"^team:createslot:(A|B)$"))
     application.add_handler(CallbackQueryHandler(team.join_team_menu_callback, pattern=r"^team:joinmenu$"))
     application.add_handler(CallbackQueryHandler(team.join_team_callback, pattern=r"^team:join:\d+$"))
+    application.add_handler(CallbackQueryHandler(team.delete_team_menu_callback, pattern=r"^team:deletemenu$"))
+    application.add_handler(CallbackQueryHandler(team.delete_team_callback, pattern=r"^team:delete:\d+$"))
     application.add_handler(CallbackQueryHandler(team.team_list_callback, pattern=r"^team:list$"))
     application.add_handler(CallbackQueryHandler(team.start_match_menu_callback, pattern=r"^team:startmatch$"))
     application.add_handler(
