@@ -201,17 +201,23 @@ async def delete_team_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return
         active_match = await team_engine.get_active_match(session, team.chat_id)
+        match_ended = False
         if active_match is not None and team_id in (active_match.team_a_id, active_match.team_b_id):
-            await query.answer(
-                "Can't delete a team that's in an active match - finish the match first.", show_alert=True
-            )
-            return
+            # Don't hard-block: an active match that never finishes (e.g. an
+            # abandoned/stuck test match) would otherwise leave the team
+            # impossible to delete forever. Since only the captain/group
+            # admin/owner can even reach this point, ending that match here
+            # is safe - just mark it done with no winner and proceed.
+            active_match.status = MatchStatus.COMPLETED
+            active_match.winner_team_id = None
+            match_ended = True
         name, slot = team.name, team.slot
         await team_engine.delete_team(session, team)
         await session.commit()
     await query.answer("🗑️ Team deleted.")
+    ended_note = "\n\n⚠️ An in-progress match involving this team was also ended." if match_ended else ""
     await query.edit_message_text(
-        f"🗑️ <b>Team {slot} ({name}) has been deleted.</b>\nYou can create a new Team {slot} anytime.",
+        f"🗑️ <b>Team {slot} ({name}) has been deleted.</b>{ended_note}\nYou can create a new Team {slot} anytime.",
         parse_mode="HTML",
         reply_markup=team_menu_keyboard(),
     )
