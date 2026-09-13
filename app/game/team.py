@@ -47,6 +47,15 @@ async def get_match_teams(session: AsyncSession, chat_id: int) -> tuple[Team | N
     )
 
 
+async def _user_already_on_a_team(session: AsyncSession, chat_id: int, user_id: int) -> bool:
+    all_teams = await list_teams(session, chat_id)
+    for t in all_teams:
+        members = await get_team_players(session, t.id)
+        if any(m.user_id == user_id for m in members):
+            return True
+    return False
+
+
 async def create_team(
     session: AsyncSession, chat_id: int, name: str, captain_id: int, captain_name: str, cap_color: str
 ) -> Team:
@@ -55,6 +64,12 @@ async def create_team(
     team_a, team_b = await get_match_teams(session, chat_id)
     if team_a is not None and team_b is not None:
         raise TeamError("Team A and Team B already exist in this chat. Ask an admin to reset teams first.")
+    # CRITICAL: a player can only ever be on ONE of the two teams in a chat.
+    # Without this check, someone who captains Team A and then also creates
+    # Team B ends up on both rosters - which crashes the match launch later
+    # (the same user_id gets inserted twice into the same innings' Game).
+    if await _user_already_on_a_team(session, chat_id, captain_id):
+        raise TeamError("You're already on a team in this chat - you can't create/captain a second one.")
     slot = "A" if team_a is None else "B"
     taken_colors = {t.cap_color for t in (team_a, team_b) if t is not None}
     if cap_color in taken_colors:
@@ -79,6 +94,16 @@ async def list_teams(session: AsyncSession, chat_id: int) -> list[Team]:
     return list(result.scalars().all())
 
 
+async def reset_teams(session: AsyncSession, chat_id: int) -> int:
+    """Deletes every Team (and its TeamPlayer rows, via cascade) for this
+    chat. Used by /resetteams to clear out bad/stale team data."""
+    teams = await list_teams(session, chat_id)
+    for t in teams:
+        await session.delete(t)
+    await session.flush()
+    return len(teams)
+
+
 async def get_team_players(session: AsyncSession, team_id: int) -> list[TeamPlayer]:
     result = await session.execute(
         select(TeamPlayer).where(TeamPlayer.team_id == team_id).order_by(TeamPlayer.batting_order)
@@ -87,11 +112,8 @@ async def get_team_players(session: AsyncSession, team_id: int) -> list[TeamPlay
 
 
 async def join_team(session: AsyncSession, team: Team, user_id: int, display_name: str) -> TeamPlayer:
-    all_teams = await list_teams(session, team.chat_id)
-    for t in all_teams:
-        members = await get_team_players(session, t.id)
-        if any(m.user_id == user_id for m in members):
-            raise TeamError("You're already on a team in this chat.")
+    if await _user_already_on_a_team(session, team.chat_id, user_id):
+        raise TeamError("You're already on a team in this chat.")
     members = await get_team_players(session, team.id)
     if len(members) >= MAX_TEAM_SIZE:
         raise TeamError(f"🏏 {team.name} is already full ({MAX_TEAM_SIZE}/{MAX_TEAM_SIZE} players).")
@@ -144,7 +166,16 @@ async def _populate_innings_roster(
 ) -> None:
     batters = await get_team_players(session, batting_team_id)
     bowlers = await get_team_players(session, bowling_team_id)
+    # Defensive de-dupe: if a player somehow ended up on both rosters (e.g.
+    # leftover bad data from before the create_team/join_team "one team per
+    # chat" check existed), skip the duplicate instead of crashing the whole
+    # match with a UNIQUE constraint error - the batting side always wins
+    # the slot since they're inserted first.
+    seen_user_ids: set[int] = set()
     for p in batters:
+        if p.user_id in seen_user_ids:
+            continue
+        seen_user_ids.add(p.user_id)
         session.add(
             GamePlayer(
                 game_id=game.id,
@@ -155,6 +186,9 @@ async def _populate_innings_roster(
             )
         )
     for i, p in enumerate(bowlers):
+        if p.user_id in seen_user_ids:
+            continue
+        seen_user_ids.add(p.user_id)
         session.add(
             GamePlayer(
                 game_id=game.id,
