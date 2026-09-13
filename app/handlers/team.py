@@ -15,7 +15,12 @@ from app.database.models import MatchStatus, TeamMatch
 from app.game import engine, team as team_engine
 from app.handlers.solo import _announce_game_start
 from app.keyboards.game import spell_choice_keyboard
-from app.keyboards.team import team_cap_choice_keyboard, team_join_keyboard, team_menu_keyboard
+from app.keyboards.team import (
+    team_create_choice_keyboard,
+    team_delete_keyboard,
+    team_join_keyboard,
+    team_menu_keyboard,
+)
 from app.services.leaderboard import apply_match_result
 from app.utils.helpers import display_name
 from app.utils.permissions import is_admin_or_owner
@@ -43,8 +48,8 @@ async def team_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 # --------------------------------------------------------------------------- #
-# Create team: pick a cap (Blue/Red) for whichever slot (A/B) is still free
-# in this chat, then send the team name as a message.
+# Create team: pick which slot to create (Team A = Blue Cap, Team B = Red
+# Cap - fixed, chosen together in one tap), then send the team name.
 # --------------------------------------------------------------------------- #
 async def create_team_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -55,35 +60,28 @@ async def create_team_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     if team_a is not None and team_b is not None:
         await query.edit_message_text(
             "⚠️ Team A and Team B already exist in this chat.\n"
-            "Ask a group admin or the bot owner to reset teams before creating new ones.",
+            "Ask a group admin or the bot owner to delete a team first (🗑️ Delete Team).",
             reply_markup=team_menu_keyboard(),
         )
         return
-    slot = "A" if team_a is None else "B"
-    taken_colors = {t.cap_color for t in (team_a, team_b) if t is not None}
-    context.user_data["creating_team_slot"] = slot
     await query.edit_message_text(
-        f"➕ <b>Create Team</b>\n\n🅰️🅱️ Choose a cap for <b>Team {slot}</b>:",
+        "➕ <b>Create Team</b>\n\nChoose which team to create:",
         parse_mode="HTML",
-        reply_markup=team_cap_choice_keyboard(exclude=taken_colors),
+        reply_markup=team_create_choice_keyboard(team_a is not None, team_b is not None),
     )
 
 
-async def team_cap_choice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def create_team_slot_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    cap_color = query.data.split(":")[2]  # "team:cap:blue" / "team:cap:red"
-    slot = context.user_data.get("creating_team_slot")
-    if slot is None:
-        await query.answer("That expired - start again from ➕ Create Team.", show_alert=True)
-        return
-    context.user_data["creating_team_cap"] = cap_color
+    slot = query.data.split(":")[2]  # "team:createslot:A" / "team:createslot:B"
+    cap_color = team_engine.CAP_BY_SLOT[slot]
+    context.user_data["creating_team_slot"] = slot
     context.user_data["awaiting_team_name"] = update.effective_chat.id
     await query.answer()
     cap_label = team_engine.CAP_LABELS[cap_color]
     await query.edit_message_text(
-        f"{team_engine.CAP_EMOJI[cap_color]} Cap selected: <b>{cap_label}</b>\n\n"
-        f"Now choose a name for your <b>Team {slot}</b>.\n"
-        "Send it as a message (e.g. Warriors, Thunder, Kings, etc.)",
+        f"{team_engine.CAP_EMOJI[cap_color]} Creating <b>Team {slot}</b> ({cap_label})\n\n"
+        "Now send the team name as a message (e.g. Warriors, Thunder, Kings, etc.)",
         parse_mode="HTML",
     )
 
@@ -93,24 +91,23 @@ async def team_name_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if awaiting_chat != update.effective_chat.id:
         return
     slot = context.user_data.get("creating_team_slot")
-    cap_color = context.user_data.get("creating_team_cap")
-    if slot is None or cap_color is None:
-        return  # stray text with no pending cap-choice flow - ignore
+    if slot is None:
+        return  # stray text with no pending create-team flow - ignore
     context.user_data.pop("awaiting_team_name", None)
     context.user_data.pop("creating_team_slot", None)
-    context.user_data.pop("creating_team_cap", None)
 
     name = update.effective_message.text.strip()[:64]
     user = update.effective_user
     async with get_session() as session:
         try:
             team = await team_engine.create_team(
-                session, update.effective_chat.id, name, user.id, display_name(user), cap_color
+                session, update.effective_chat.id, name, user.id, display_name(user), slot
             )
         except team_engine.TeamError as exc:
             await update.effective_message.reply_text(f"⚠️ {exc}")
             return
         await session.commit()
+    cap_color = team_engine.CAP_BY_SLOT[slot]
     cap_label = team_engine.CAP_LABELS[cap_color]
     await update.effective_message.reply_html(
         f"{team_engine.CAP_EMOJI[cap_color]} <b>Team {team.slot} created!</b>\n\n"
@@ -167,6 +164,56 @@ async def join_team_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"🏏 Team Name: {team.name}\n\n"
         "You're ready for the match! 🎉",
         parse_mode="HTML",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Delete team
+# --------------------------------------------------------------------------- #
+async def delete_team_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    async with get_session() as session:
+        team_a, team_b = await team_engine.get_match_teams(session, update.effective_chat.id)
+    await query.answer()
+    if team_a is None and team_b is None:
+        await query.edit_message_text("No teams to delete in this chat.", reply_markup=team_menu_keyboard())
+        return
+    await query.edit_message_text(
+        "🗑️ <b>Delete Team</b>\n\nPick which team to delete (that team's captain, a group admin, or the bot owner only):",
+        parse_mode="HTML",
+        reply_markup=team_delete_keyboard(team_a, team_b),
+    )
+
+
+async def delete_team_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    team_id = int(query.data.split(":")[2])
+    user = update.effective_user
+    async with get_session() as session:
+        team = await team_engine.get_team(session, team_id)
+        if team is None:
+            await query.answer("Team not found.", show_alert=True)
+            return
+        authorized = user.id == team.captain_id or await is_admin_or_owner(update, context, user.id)
+        if not authorized:
+            await query.answer(
+                "Only that team's captain, a group admin, or the bot owner can delete it.", show_alert=True
+            )
+            return
+        active_match = await team_engine.get_active_match(session, team.chat_id)
+        if active_match is not None and team_id in (active_match.team_a_id, active_match.team_b_id):
+            await query.answer(
+                "Can't delete a team that's in an active match - finish the match first.", show_alert=True
+            )
+            return
+        name, slot = team.name, team.slot
+        await team_engine.delete_team(session, team)
+        await session.commit()
+    await query.answer("🗑️ Team deleted.")
+    await query.edit_message_text(
+        f"🗑️ <b>Team {slot} ({name}) has been deleted.</b>\nYou can create a new Team {slot} anytime.",
+        parse_mode="HTML",
+        reply_markup=team_menu_keyboard(),
     )
 
 
