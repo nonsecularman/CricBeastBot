@@ -35,6 +35,7 @@ async def _on_startup(application: Application) -> None:
                 BotCommand("team", "Team game menu"),
                 BotCommand("add_a", "Add a player to Team A (reply to them)"),
                 BotCommand("add_b", "Add a player to Team B (reply to them)"),
+                BotCommand("resetteams", "Clear Team A/B in this chat (admin/owner)"),
                 BotCommand("tournament", "Tournament menu"),
                 BotCommand("profile", "Your player profile"),
                 BotCommand("stats", "Your player profile"),
@@ -68,6 +69,7 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("team", team.team_command))
     application.add_handler(CommandHandler("add_a", team.add_a_command))
     application.add_handler(CommandHandler("add_b", team.add_b_command))
+    application.add_handler(CommandHandler("resetteams", team.reset_teams_command))
     application.add_handler(CommandHandler("tournament", tournament.tournament_command))
 
     application.add_handler(CommandHandler("profile", profile.profile_command))
