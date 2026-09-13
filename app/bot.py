@@ -13,6 +13,7 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    filters,
 )
 
 from app.config import settings
@@ -101,6 +102,17 @@ def build_application() -> Application:
     application.add_handler(CallbackQueryHandler(solo.bat_number_callback, pattern=r"^bat:\d+:\d+$"))
     application.add_handler(CallbackQueryHandler(solo.bowl_number_callback, pattern=r"^bowl:\d+:\d+$"))
     application.add_handler(CallbackQueryHandler(solo.bowl_retry_callback, pattern=r"^bowl:retry:\d+$"))
+    # Batting now happens by typing "1"-"6" as a plain group message (works
+    # for Solo AND Team, same shared engine) - own group (4) so it always
+    # gets a chance regardless of what the team/tournament name-input
+    # handlers in groups 1-3 do with that update.
+    application.add_handler(
+        MessageHandler(
+            filters.ChatType.GROUPS & filters.TEXT & filters.Regex(r"^[1-6]$"),
+            solo.batter_text_number_message,
+        ),
+        4,
+    )
 
     # ---- Team game -------------------------------------------------- #
     application.add_handler(CallbackQueryHandler(team.create_team_callback, pattern=r"^team:create$"))
