@@ -287,10 +287,7 @@ async def _announce_game_start(
 
     balls = []
     text = intro_text + status_text(game, batter, bowler, balls, waiting_on_dm=True)
-    kb_rows = list(number_choice_keyboard("bat", game.id).inline_keyboard)
-    if bot_username:
-        kb_rows += status_message_keyboard(bot_username).inline_keyboard
-    keyboard = InlineKeyboardMarkup(kb_rows)
+    keyboard = status_message_keyboard(bot_username) if bot_username else None
 
     try:
         if game.status_message_id:
@@ -313,7 +310,6 @@ async def _announce_game_start(
             chat_id=game.chat_id,
             text=batter_turn_text(batter),
             parse_mode="HTML",
-            reply_markup=number_choice_keyboard("bat", game.id),
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to send batter-turn ping for game %s: %s", game.id, exc)
@@ -389,6 +385,41 @@ async def bat_number_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await query.answer(str(exc), show_alert=True)
             return
         await query.answer(f"🏏 You chose {number}!")
+        await _after_submission(context, session, game, resolution)
+
+
+async def batter_text_number_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Lets the batter just TYPE a number (1-6) in the group instead of tapping
+    a button - this is the only way to bat now (works for Solo AND Team,
+    since both share the exact same underlying game engine/Game row).
+    Silently ignores the message if it's not actually that user's turn to
+    bat, so random "1"-"6" texts in a busy group don't trigger noisy replies.
+    """
+    message = update.effective_message
+    text = (message.text or "").strip()
+    if text not in {"1", "2", "3", "4", "5", "6"}:
+        return
+    chat = update.effective_chat
+    if chat is None or chat.type == "private":
+        return
+    user = update.effective_user
+    if not rate_limiter.allow(user.id):
+        return
+    number = int(text)
+
+    async with get_session() as session:
+        game = await engine.get_game_awaiting_batter(session, chat.id, user.id)
+        if game is None:
+            return  # not this user's turn (or no active game) - ignore quietly
+        try:
+            resolution = await engine.submit_batter_number(session, game, user.id, number)
+        except engine.GameError:
+            return  # e.g. they already batted this ball - ignore quietly
+        try:
+            await message.reply_text(f"🏏 You chose {number}!")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to ack batter's typed number for game %s: %s", game.id, exc)
         await _after_submission(context, session, game, resolution)
 
 
@@ -534,10 +565,7 @@ async def _after_submission(context: ContextTypes.DEFAULT_TYPE, session: AsyncSe
     except Exception as exc:  # noqa: BLE001 - never let this crash ball resolution
         logger.warning("get_me() failed while rendering status for game %s: %s", game.id, exc)
         bot_username = None
-    kb_rows = list(number_choice_keyboard("bat", game.id).inline_keyboard)
-    if bot_username:
-        kb_rows += status_message_keyboard(bot_username).inline_keyboard
-    keyboard = InlineKeyboardMarkup(kb_rows)
+    keyboard = status_message_keyboard(bot_username) if bot_username else None
     try:
         if game.status_message_id:
             try:
@@ -557,16 +585,14 @@ async def _after_submission(context: ContextTypes.DEFAULT_TYPE, session: AsyncSe
         logger.warning("Failed to post/update status message for game %s: %s", game.id, exc)
 
     # IMPORTANT: also send the batter a brand-new, separate "your turn"
-    # ping in the group (with the same number buttons) EVERY ball - editing
-    # the status message above does NOT trigger a Telegram notification
-    # even though it contains their tag, so without this fresh message the
-    # batter never actually gets pinged for their turn.
+    # ping in the group EVERY ball - editing the status message above does
+    # NOT trigger a Telegram notification even though it contains their tag,
+    # so without this fresh message the batter never actually gets pinged.
     try:
         await context.bot.send_message(
             chat_id=game.chat_id,
             text=batter_turn_text(batter),
             parse_mode="HTML",
-            reply_markup=number_choice_keyboard("bat", game.id),
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to send batter-turn ping for game %s: %s", game.id, exc)
