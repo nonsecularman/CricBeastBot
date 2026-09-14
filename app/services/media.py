@@ -5,6 +5,7 @@ plays for which game event, so no other module needs to hard-code a URL.
 from __future__ import annotations
 
 import logging
+import random
 
 from telegram import Message
 from telegram.error import TelegramError
@@ -19,10 +20,13 @@ BATTING = "batting"
 OUT = "out"
 FOUR = "four"
 SIX = "six"
+BATTER_TURN = "batter_turn"
 
 
 def media_for(event: str) -> str | None:
-    return settings.media.for_event(event)
+    """Picks ONE random URL from that event's list (or None if nothing is configured)."""
+    urls = settings.media.for_event(event)
+    return random.choice(urls) if urls else None
 
 
 async def send_event_media(message_send_video, event: str, caption: str | None = None) -> Message | None:
@@ -32,7 +36,9 @@ async def send_event_media(message_send_video, event: str, caption: str | None =
     `functools.partial(context.bot.send_video, chat_id=chat_id)`.
 
     Falls back silently (returns None) if no media is configured or Telegram
-    rejects the URL - callers should never assume this succeeds.
+    rejects the URL - callers should never assume this succeeds. A random
+    URL is picked each call, so add more comma-separated URLs to the env var
+    for that event any time to widen the rotation - no code changes needed.
     """
     url = media_for(event)
     if not url:
