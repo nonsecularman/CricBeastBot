@@ -33,17 +33,29 @@ def _int_env(name: str, default: int | None = None) -> int | None:
         return default
 
 
+def _list_env(name: str) -> list[str]:
+    """Parses a comma-separated env var into a clean list of URLs (empty entries dropped)."""
+    raw = os.getenv(name, "")
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
 @dataclass(frozen=True)
 class MediaConfig:
-    bowling: str | None = field(default_factory=lambda: os.getenv("MEDIA_BOWLING") or None)
-    batting: str | None = field(default_factory=lambda: os.getenv("MEDIA_BATTING") or None)
-    out: str | None = field(default_factory=lambda: os.getenv("MEDIA_OUT") or None)
-    four: str | None = field(default_factory=lambda: os.getenv("MEDIA_FOUR") or None)
-    six: str | None = field(default_factory=lambda: os.getenv("MEDIA_SIX") or None)
+    """
+    Each category holds a LIST of URLs (comma-separated in .env) so a random
+    one is picked each time - add as many as you like later by just adding
+    more comma-separated URLs to the matching env var, no code changes needed.
+    """
+    bowling: list[str] = field(default_factory=lambda: _list_env("MEDIA_BOWLING"))
+    batting: list[str] = field(default_factory=lambda: _list_env("MEDIA_BATTING"))
+    out: list[str] = field(default_factory=lambda: _list_env("MEDIA_OUT"))
+    four: list[str] = field(default_factory=lambda: _list_env("MEDIA_FOUR"))
+    six: list[str] = field(default_factory=lambda: _list_env("MEDIA_SIX"))
+    batter_turn: list[str] = field(default_factory=lambda: _list_env("MEDIA_BATTER_TURN"))
 
-    def for_event(self, event: str) -> str | None:
-        """event in {bowling, batting, out, four, six}"""
-        return getattr(self, event, None)
+    def for_event(self, event: str) -> list[str]:
+        """event in {bowling, batting, out, four, six, batter_turn}"""
+        return getattr(self, event, [])
 
 
 @dataclass(frozen=True)
