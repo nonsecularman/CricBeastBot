@@ -71,6 +71,10 @@ class Settings:
     rate_limit_actions: int = _int_env("RATE_LIMIT_ACTIONS", 8) or 8
     rate_limit_window: int = _int_env("RATE_LIMIT_WINDOW", 5) or 5
 
+    solo_autostart_seconds: int = _int_env("SOLO_AUTOSTART_SECONDS", 70) or 70
+    turn_timeout_seconds: int = _int_env("TURN_TIMEOUT_SECONDS", 50) or 50
+    turn_warning_remaining_seconds: int = _int_env("TURN_WARNING_REMAINING_SECONDS", 30) or 30
+
     media: MediaConfig = field(default_factory=MediaConfig)
 
     def validate(self) -> None:
