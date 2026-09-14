@@ -4,6 +4,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 def team_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
+            [InlineKeyboardButton("🎙️ Claim Host", callback_data="team:claimhost")],
             [InlineKeyboardButton("➕ Create Team", callback_data="team:create")],
             [InlineKeyboardButton("🚪 Join Team", callback_data="team:joinmenu")],
             [InlineKeyboardButton("🗑️ Delete Team", callback_data="team:deletemenu")],
