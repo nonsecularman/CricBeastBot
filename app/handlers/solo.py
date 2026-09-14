@@ -305,16 +305,32 @@ async def _announce_game_start(
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to post/update status message for game %s: %s", game.id, exc)
 
-    try:
-        await context.bot.send_message(
-            chat_id=game.chat_id,
-            text=batter_turn_text(batter),
-            parse_mode="HTML",
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Failed to send batter-turn ping for game %s: %s", game.id, exc)
+    await _send_batter_turn_ping(context, game, batter)
 
     await _prompt_bowler_dm(context, session, game, batter, bowler)
+
+
+async def _send_batter_turn_ping(context: ContextTypes.DEFAULT_TYPE, game: Game, batter: GamePlayer) -> None:
+    """
+    Pings the batter for their turn with a random GIF (rotates through
+    whatever URLs are configured in MEDIA_BATTER_TURN - add more there
+    anytime, no code changes needed) plus the caption. Falls back to a
+    plain text message if no media is configured or the send fails, so the
+    ping is never silently dropped.
+    """
+    caption = batter_turn_text(batter)
+    sent = None
+    try:
+        sent = await media.send_event_media(
+            _bound_send_video(context, game.chat_id), media.BATTER_TURN, caption=caption
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to send batter-turn media for game %s: %s", game.id, exc)
+    if sent is None:
+        try:
+            await context.bot.send_message(chat_id=game.chat_id, text=caption, parse_mode="HTML")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to send batter-turn ping for game %s: %s", game.id, exc)
 
 
 async def _prompt_bowler_dm(context: ContextTypes.DEFAULT_TYPE, session: AsyncSession, game: Game, batter: GamePlayer, bowler: GamePlayer) -> None:
@@ -588,14 +604,7 @@ async def _after_submission(context: ContextTypes.DEFAULT_TYPE, session: AsyncSe
     # ping in the group EVERY ball - editing the status message above does
     # NOT trigger a Telegram notification even though it contains their tag,
     # so without this fresh message the batter never actually gets pinged.
-    try:
-        await context.bot.send_message(
-            chat_id=game.chat_id,
-            text=batter_turn_text(batter),
-            parse_mode="HTML",
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Failed to send batter-turn ping for game %s: %s", game.id, exc)
+    await _send_batter_turn_ping(context, game, batter)
 
     # IMPORTANT: prompt the bowler again for EVERY ball while the game is
     # still on - not only when the bowler/batter changes. Within the same
