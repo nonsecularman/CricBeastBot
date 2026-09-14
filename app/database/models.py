@@ -93,6 +93,20 @@ class Group(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class TeamHost(Base):
+    """
+    Whoever has 'claimed host' for a chat's team-game setup gets elevated
+    rights over BOTH Team A and Team B (adding players to either, deleting
+    either team) - on top of each team's own captain. One host per chat.
+    """
+    __tablename__ = "team_hosts"
+
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    host_id: Mapped[int] = mapped_column(BigInteger)
+    host_name: Mapped[str] = mapped_column(String(128), default="")
+    claimed_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 # --------------------------------------------------------------------------- #
 # Solo / generic game tables
 # --------------------------------------------------------------------------- #
