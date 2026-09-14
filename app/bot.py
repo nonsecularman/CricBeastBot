@@ -37,6 +37,7 @@ async def _on_startup(application: Application) -> None:
                 BotCommand("add_a", "Add a player to Team A (reply to them)"),
                 BotCommand("add_b", "Add a player to Team B (reply to them)"),
                 BotCommand("resetteams", "Clear Team A/B in this chat (admin/owner)"),
+                BotCommand("claimhost", "Claim host rights over both teams"),
                 BotCommand("tournament", "Tournament menu"),
                 BotCommand("profile", "Your player profile"),
                 BotCommand("stats", "Your player profile"),
@@ -71,6 +72,7 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("add_a", team.add_a_command))
     application.add_handler(CommandHandler("add_b", team.add_b_command))
     application.add_handler(CommandHandler("resetteams", team.reset_teams_command))
+    application.add_handler(CommandHandler("claimhost", team.claim_host_command))
     application.add_handler(CommandHandler("tournament", tournament.tournament_command))
 
     application.add_handler(CommandHandler("profile", profile.profile_command))
@@ -120,6 +122,7 @@ def build_application() -> Application:
     application.add_handler(CallbackQueryHandler(team.join_team_menu_callback, pattern=r"^team:joinmenu$"))
     application.add_handler(CallbackQueryHandler(team.join_team_callback, pattern=r"^team:join:\d+$"))
     application.add_handler(CallbackQueryHandler(team.delete_team_menu_callback, pattern=r"^team:deletemenu$"))
+    application.add_handler(CallbackQueryHandler(team.claim_host_callback, pattern=r"^team:claimhost$"))
     application.add_handler(CallbackQueryHandler(team.delete_team_callback, pattern=r"^team:delete:\d+$"))
     application.add_handler(CallbackQueryHandler(team.team_list_callback, pattern=r"^team:list$"))
     application.add_handler(CallbackQueryHandler(team.start_match_menu_callback, pattern=r"^team:startmatch$"))
