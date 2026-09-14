@@ -19,6 +19,7 @@ from app.database.models import (
     GameType,
     MatchStatus,
     Team,
+    TeamHost,
     TeamMatch,
     TeamPlayer,
 )
@@ -33,6 +34,53 @@ CAP_BY_SLOT = {"A": "blue", "B": "red"}  # fixed: Team A is always Blue Cap, Tea
 
 class TeamError(Exception):
     pass
+
+
+# --------------------------------------------------------------------------- #
+# Host claim - one person can claim host for a chat's team-game setup, which
+# gives them add/delete rights over BOTH Team A and Team B (on top of each
+# team's own captain).
+# --------------------------------------------------------------------------- #
+async def get_host(session: AsyncSession, chat_id: int) -> TeamHost | None:
+    return await session.get(TeamHost, chat_id)
+
+
+async def claim_host(session: AsyncSession, chat_id: int, user_id: int, user_name: str) -> TeamHost:
+    existing = await get_host(session, chat_id)
+    if existing is not None:
+        raise TeamError(
+            f"{existing.host_name or 'Someone'} is already the host for this chat's teams. "
+            "A group admin or the bot owner can transfer host with /claimhost."
+        )
+    host = TeamHost(chat_id=chat_id, host_id=user_id, host_name=user_name)
+    session.add(host)
+    await session.flush()
+    return host
+
+
+async def force_claim_host(session: AsyncSession, chat_id: int, user_id: int, user_name: str) -> TeamHost:
+    """Used by a group admin/owner to take over or reassign the host claim."""
+    existing = await get_host(session, chat_id)
+    if existing is not None:
+        existing.host_id = user_id
+        existing.host_name = user_name
+        await session.flush()
+        return existing
+    return await claim_host(session, chat_id, user_id, user_name)
+
+
+async def release_host(session: AsyncSession, chat_id: int) -> bool:
+    existing = await get_host(session, chat_id)
+    if existing is None:
+        return False
+    await session.delete(existing)
+    await session.flush()
+    return True
+
+
+async def is_host(session: AsyncSession, chat_id: int, user_id: int) -> bool:
+    host = await get_host(session, chat_id)
+    return host is not None and host.host_id == user_id
 
 
 async def get_team_by_slot(session: AsyncSession, chat_id: int, slot: str) -> Team | None:
