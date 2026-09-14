@@ -41,6 +41,73 @@ async def team_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
+# --------------------------------------------------------------------------- #
+# Host claim - the host gets add/delete rights over BOTH Team A and Team B.
+# --------------------------------------------------------------------------- #
+async def claim_host_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat.type == "private":
+        await update.effective_message.reply_text("⚠️ This only works in a group chat.")
+        return
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+    async with get_session() as session:
+        existing = await team_engine.get_host(session, chat_id)
+        if existing is not None:
+            if existing.host_id == user.id:
+                await update.effective_message.reply_text("You're already the host for this chat's teams.")
+                return
+            if await is_admin_or_owner(update, context, user.id):
+                await team_engine.force_claim_host(session, chat_id, user.id, display_name(user))
+                await session.commit()
+                await update.effective_message.reply_html(
+                    f"🎙️ Host reassigned from <b>{existing.host_name}</b> to <b>{display_name(user)}</b>."
+                )
+                return
+            await update.effective_message.reply_text(
+                f"⚠️ {existing.host_name or 'Someone'} is already the host for this chat's teams. "
+                "A group admin or the bot owner can transfer it with /claimhost."
+            )
+            return
+        await team_engine.claim_host(session, chat_id, user.id, display_name(user))
+        await session.commit()
+    await update.effective_message.reply_html(
+        f"🎙️ <b>{display_name(user)} is now the host!</b>\n\n"
+        "You can now add players to BOTH Team A and Team B with /add_a and /add_b "
+        "(reply to their message), and delete either team, regardless of who captains them."
+    )
+
+
+async def claim_host_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if update.effective_chat.type == "private":
+        await query.answer("This only works in a group chat.", show_alert=True)
+        return
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+    async with get_session() as session:
+        existing = await team_engine.get_host(session, chat_id)
+        if existing is not None:
+            if existing.host_id == user.id:
+                await query.answer("You're already the host.", show_alert=True)
+                return
+            await query.answer(
+                f"{existing.host_name or 'Someone'} is already the host. "
+                "A group admin/owner can transfer it via /claimhost.",
+                show_alert=True,
+            )
+            return
+        await team_engine.claim_host(session, chat_id, user.id, display_name(user))
+        await session.commit()
+    await query.answer("🎙️ You're the host now!")
+    await query.edit_message_text(
+        f"🎙️ <b>{display_name(user)} is now the host!</b>\n\n"
+        "You can add players to BOTH Team A and Team B with /add_a and /add_b "
+        "(reply to their message), and delete either team.",
+        parse_mode="HTML",
+        reply_markup=team_menu_keyboard(),
+    )
+
+
 async def team_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_html(
         "👥 <b>TEAM GAME</b>\n\nManage teams and start a match.", reply_markup=team_menu_keyboard()
@@ -196,8 +263,11 @@ async def delete_team_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             return
         authorized = user.id == team.captain_id or await is_admin_or_owner(update, context, user.id)
         if not authorized:
+            authorized = await team_engine.is_host(session, team.chat_id, user.id)
+        if not authorized:
             await query.answer(
-                "Only that team's captain, a group admin, or the bot owner can delete it.", show_alert=True
+                "Only that team's captain, the host, a group admin, or the bot owner can delete it.",
+                show_alert=True,
             )
             return
         active_match = await team_engine.get_active_match(session, team.chat_id)
@@ -251,8 +321,10 @@ async def _add_to_team_command(update: Update, context: ContextTypes.DEFAULT_TYP
             return
         authorized = requester.id == team.captain_id or await is_admin_or_owner(update, context, requester.id)
         if not authorized:
+            authorized = await team_engine.is_host(session, team.chat_id, requester.id)
+        if not authorized:
             await update.effective_message.reply_text(
-                "⚠️ Only that team's captain, a group admin, or the bot owner can add players."
+                "⚠️ Only that team's captain, the host, a group admin, or the bot owner can add players."
             )
             return
         try:
@@ -290,6 +362,7 @@ async def reset_teams_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     async with get_session() as session:
         removed = await team_engine.reset_teams(session, update.effective_chat.id)
+        await team_engine.release_host(session, update.effective_chat.id)
         await session.commit()
     if removed:
         await update.effective_message.reply_text(
@@ -306,6 +379,7 @@ async def team_list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     async with get_session() as session:
         team_a, team_b = await team_engine.get_match_teams(session, update.effective_chat.id)
+        host = await team_engine.get_host(session, update.effective_chat.id)
         blocks = []
         for label, t in (("A", team_a), ("B", team_b)):
             if t is None:
@@ -321,7 +395,8 @@ async def team_list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 f"{roster or '  (empty)'}"
             )
     await query.answer()
-    text = "📋 <b>Team List</b>\n\n" + "\n\n".join(blocks)
+    host_line = f"🎙️ Host: {host.host_name}\n\n" if host else ""
+    text = "📋 <b>Team List</b>\n\n" + host_line + "\n\n".join(blocks)
     await query.edit_message_text(text, parse_mode="HTML", reply_markup=team_menu_keyboard())
 
 
