@@ -5,12 +5,14 @@ full ball-by-ball gameplay loop (group batting + DM bowling).
 from __future__ import annotations
 
 import logging
+import random
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
+from app.config import settings
 from app.database.database import get_session
 from app.database.models import Game, GamePlayer, GameStatus, GameType
 from app.game import engine
@@ -73,10 +75,54 @@ async def spell_choice_callback(update: Update, context: ContextTypes.DEFAULT_TY
             return
         await query.answer()
         players = await engine.get_players(session, game.id)
-        text = solo_queue_text(game, players)
+        text = solo_queue_text(game, players) + (
+            f"\n\n⏳ Auto-start timer initiated: match begins in {settings.solo_autostart_seconds} "
+            "seconds if enough players have joined!"
+        )
         msg = await query.edit_message_text(text, parse_mode="HTML", reply_markup=solo_queue_keyboard(game.id))
         game.status_message_id = msg.message_id
-        await session.flush()
+        await session.commit()
+
+    if context.job_queue is not None:
+        context.job_queue.run_once(
+            _queue_autostart_job,
+            settings.solo_autostart_seconds,
+            data={"game_id": game.id},
+            name=f"queue_autostart:{game.id}",
+        )
+
+
+async def _queue_autostart_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Fires once, solo_autostart_seconds after a queue opens. Auto-starts the
+    match if enough players joined by then; otherwise leaves the queue open
+    for /join or a manual /startsolo - it never re-schedules itself.
+    """
+    data = context.job.data
+    async with get_session() as session:
+        game = await engine.get_game_by_id(session, data["game_id"])
+        if game is None or game.status != GameStatus.QUEUE:
+            return  # already started, cancelled, or gone - nothing to do
+        players = await engine.get_players(session, game.id)
+        if len(players) < settings.solo_min_players:
+            try:
+                await context.bot.send_message(
+                    chat_id=game.chat_id,
+                    text=(
+                        "⏳ Auto-start timer expired - not enough players joined yet. "
+                        "Keep using /join, or /startsolo once ready."
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to send autostart-expired notice for game %s: %s", game.id, exc)
+            return
+        try:
+            await context.bot.send_message(
+                chat_id=game.chat_id, text="⏳ Auto-start timer is up! THE MATCH AUTO-STARTS NOW! 🚀"
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to send autostart-now notice for game %s: %s", game.id, exc)
+        await _launch_game(context, session, game)
 
 
 # --------------------------------------------------------------------------- #
@@ -99,11 +145,9 @@ async def _refresh_queue_message(context: ContextTypes.DEFAULT_TYPE, session: As
 
 
 async def _try_autostart(update: Update, context: ContextTypes.DEFAULT_TYPE, session: AsyncSession, game: Game) -> bool:
-    from app.config import settings
-
     players = await engine.get_players(session, game.id)
     if len(players) >= settings.solo_max_players:
-        await _launch_game(update, context, session, game)
+        await _launch_game(context, session, game)
         return True
     return False
 
@@ -163,7 +207,7 @@ async def startsolo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if not engine.can_force_start(players):
             await update.effective_message.reply_text("⚠️ Need at least 2 players to start.")
             return
-        await _launch_game(update, context, session, game)
+        await _launch_game(context, session, game)
 
 
 async def join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -225,7 +269,7 @@ async def forcestart_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await query.answer("Need at least 2 players.", show_alert=True)
             return
         await query.answer("▶️ Starting!")
-        await _launch_game(update, context, session, game)
+        await _launch_game(context, session, game)
 
 
 async def cancelgame_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -252,7 +296,7 @@ async def cancelgame_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 # --------------------------------------------------------------------------- #
 # Game launch + bowler DM prompt
 # --------------------------------------------------------------------------- #
-async def _launch_game(update: Update, context: ContextTypes.DEFAULT_TYPE, session: AsyncSession, game: Game) -> None:
+async def _launch_game(context: ContextTypes.DEFAULT_TYPE, session: AsyncSession, game: Game) -> None:
     batter, bowler = await engine.start_game(session, game)
     await _announce_game_start(context, session, game, batter, bowler)
 
@@ -305,8 +349,10 @@ async def _announce_game_start(
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to post/update status message for game %s: %s", game.id, exc)
 
-    await _send_batter_turn_ping(context, game, batter)
-
+    # NOTE: the batter is NOT pinged here. Bowling always happens first -
+    # the batter only gets prompted once the bowler has actually bowled (see
+    # bowl_number_callback below), which also sends the "ball delivered!"
+    # GIF in the group as the signal that it's now the batter's turn.
     await _prompt_bowler_dm(context, session, game, batter, bowler)
 
 
@@ -331,6 +377,117 @@ async def _send_batter_turn_ping(context: ContextTypes.DEFAULT_TYPE, game: Game,
             await context.bot.send_message(chat_id=game.chat_id, text=caption, parse_mode="HTML")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to send batter-turn ping for game %s: %s", game.id, exc)
+    _schedule_turn_timers(context, game, "bat", batter.user_id, batter.display_name, game.chat_id)
+
+
+# --------------------------------------------------------------------------- #
+# AFK handling: whoever's turn it is gets a "hurry up" warning, then an
+# auto-played random number if they never respond - so a game can never get
+# stuck forever on one missing player.
+# --------------------------------------------------------------------------- #
+def _turn_token(game: Game, role: str) -> str:
+    return f"{game.id}:{game.current_over}:{game.balls_this_over}:{role}"
+
+
+def _cancel_existing_timers(context: ContextTypes.DEFAULT_TYPE, token: str) -> None:
+    if context.job_queue is None:
+        return
+    for name in (f"warn:{token}", f"timeout:{token}"):
+        for job in context.job_queue.get_jobs_by_name(name):
+            job.schedule_removal()
+
+
+def _schedule_turn_timers(
+    context: ContextTypes.DEFAULT_TYPE, game: Game, role: str, user_id: int, display_name: str, chat_id: int
+) -> None:
+    """role: 'bowl' (waiting on a DM) or 'bat' (waiting on a group message)."""
+    if context.job_queue is None:
+        return  # job-queue extra not installed - AFK handling simply won't run
+    token = _turn_token(game, role)
+    _cancel_existing_timers(context, token)  # avoid stacking duplicate timers on retries
+    data = {
+        "game_id": game.id,
+        "token": token,
+        "role": role,
+        "user_id": user_id,
+        "display_name": display_name,
+        "chat_id": chat_id,
+    }
+    warn_at = max(settings.turn_timeout_seconds - settings.turn_warning_remaining_seconds, 1)
+    context.job_queue.run_once(_turn_warning_job, warn_at, data=data, name=f"warn:{token}")
+    context.job_queue.run_once(_turn_timeout_job, settings.turn_timeout_seconds, data=data, name=f"timeout:{token}")
+
+
+async def _turn_warning_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    data = context.job.data
+    async with get_session() as session:
+        game = await engine.get_game_by_id(session, data["game_id"])
+        if game is None or game.status != GameStatus.IN_PROGRESS:
+            return
+        if _turn_token(game, data["role"]) != data["token"]:
+            return  # this ball already moved on - stale timer, ignore
+    remaining = settings.turn_warning_remaining_seconds
+    try:
+        if data["role"] == "bowl":
+            await context.bot.send_message(
+                chat_id=data["user_id"],
+                text=f"⏰ Hurry up! You only have {remaining} seconds left to bowl!",
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=data["chat_id"],
+                text=f"⏰ {data['display_name']}, HURRY UP! You only have {remaining} seconds left to play!",
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to send AFK warning for game %s: %s", data["game_id"], exc)
+
+
+async def _turn_timeout_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    data = context.job.data
+    number = random.randint(1, 6)
+    async with get_session() as session:
+        game = await engine.get_game_by_id(session, data["game_id"])
+        if game is None or game.status != GameStatus.IN_PROGRESS:
+            return
+        if _turn_token(game, data["role"]) != data["token"]:
+            return  # already acted, or the ball moved on - stale timer, ignore
+
+        if data["role"] == "bowl":
+            try:
+                resolution = await engine.submit_bowler_number(session, game, data["user_id"], number)
+            except engine.GameError:
+                return
+            try:
+                await context.bot.send_message(chat_id=data["user_id"], text=f"🤖 Time's up! Auto-bowled a {number}.")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to notify AFK bowler for game %s: %s", game.id, exc)
+            if resolution is None:
+                players = await engine.get_players(session, game.id)
+                batter = next(p for p in players if p.user_id == game.current_batter_id)
+                await session.commit()
+                try:
+                    await context.bot.send_message(
+                        chat_id=game.chat_id,
+                        text=f"🤖 {data['display_name']} was AFK - auto-bowled a {number}!",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Failed to announce AFK auto-bowl for game %s: %s", game.id, exc)
+                await _send_batter_turn_ping(context, game, batter)
+            else:
+                await _after_submission(context, session, game, resolution)
+        else:  # bat
+            try:
+                resolution = await engine.submit_batter_number(session, game, data["user_id"], number)
+            except engine.GameError:
+                return
+            try:
+                await context.bot.send_message(
+                    chat_id=game.chat_id,
+                    text=f"🤖 {data['display_name']} was AFK - auto-played a {number}!",
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to announce AFK auto-bat for game %s: %s", game.id, exc)
+            await _after_submission(context, session, game, resolution)
 
 
 async def _prompt_bowler_dm(context: ContextTypes.DEFAULT_TYPE, session: AsyncSession, game: Game, batter: GamePlayer, bowler: GamePlayer) -> None:
@@ -356,6 +513,10 @@ async def _prompt_bowler_dm(context: ContextTypes.DEFAULT_TYPE, session: AsyncSe
             logger.warning("Failed to send 'couldn't DM you' fallback for game %s: %s", game.id, exc)
     except Exception as exc:  # noqa: BLE001 - any other unexpected error while DMing the bowler
         logger.warning("Unexpected error prompting bowler DM for game %s: %s", game.id, exc)
+    # Schedule the AFK timer regardless of whether the DM itself succeeded -
+    # even if we couldn't reach them, the game should still move on
+    # eventually via an auto-played random number rather than hang forever.
+    _schedule_turn_timers(context, game, "bowl", bowler.user_id, bowler.display_name, game.chat_id)
 
 
 async def bowl_retry_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -430,6 +591,12 @@ async def batter_text_number_message(update: Update, context: ContextTypes.DEFAU
             return  # not this user's turn (or no active game) - ignore quietly
         try:
             resolution = await engine.submit_batter_number(session, game, user.id, number)
+        except engine.WaitForBowler:
+            try:
+                await message.reply_text("⏳ Wait for the bowler to bowl first!")
+            except Exception:  # noqa: BLE001
+                pass
+            return
         except engine.GameError:
             return  # e.g. they already batted this ball - ignore quietly
         try:
@@ -466,7 +633,18 @@ async def bowl_number_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             await query.edit_message_text(bowl_locked_text())
         except Exception as exc:  # noqa: BLE001 - never let this roll back the submitted number
             logger.warning("Failed to edit bowl-locked DM message for game %s: %s", game.id, exc)
-        await _after_submission(context, session, game, resolution)
+
+        if resolution is None:
+            # Expected path: bowling always happens first, so the batter
+            # couldn't have submitted yet. This is the moment to reveal
+            # "ball delivered!" in the group (with a GIF) and hand the turn
+            # to the batter - they were never prompted before now.
+            players = await engine.get_players(session, game.id)
+            batter = next(p for p in players if p.user_id == game.current_batter_id)
+            await session.commit()
+            await _send_batter_turn_ping(context, game, batter)
+        else:
+            await _after_submission(context, session, game, resolution)
 
 
 # --------------------------------------------------------------------------- #
@@ -600,11 +778,10 @@ async def _after_submission(context: ContextTypes.DEFAULT_TYPE, session: AsyncSe
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to post/update status message for game %s: %s", game.id, exc)
 
-    # IMPORTANT: also send the batter a brand-new, separate "your turn"
-    # ping in the group EVERY ball - editing the status message above does
-    # NOT trigger a Telegram notification even though it contains their tag,
-    # so without this fresh message the batter never actually gets pinged.
-    await _send_batter_turn_ping(context, game, batter)
+    # NOTE: the batter is NOT pinged here either. Bowling always happens
+    # first for the next ball too - the batter only gets prompted (with the
+    # "ball delivered!" GIF) once the bowler has actually bowled, from
+    # inside bowl_number_callback.
 
     # IMPORTANT: prompt the bowler again for EVERY ball while the game is
     # still on - not only when the bowler/batter changes. Within the same
